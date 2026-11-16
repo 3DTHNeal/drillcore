@@ -450,46 +450,69 @@
     return el("div", { class: "tbl-wrap" }, el("table", { class: "md" }, el("tbody", {}, rows)));
   }
 
-  // raw[from:to], with each claim and link on it marked. Where marks overlap, the narrowest claim shows.
+  // raw[from:to], with each claim and link on it marked. A claim inside another, as an input inside its working, is
+  // marked inside it, so the outer one stays whole. Claims on the same characters are one mark (`group`), and a link
+  // shows only where no claim stands.
   function marked(raw, from, to, spans) {
-    const here = spans.filter((span) => span.end > from && span.start < to);
-    if (!here.length) return [raw.slice(from, to)];
-    const cuts = new Set([from, to]);
-    for (const span of here) {
-      cuts.add(Math.max(from, span.start));
-      cuts.add(Math.min(to, span.end));
-    }
-    const points = [...cuts].sort((a, b) => a - b);
-    const out = [];
-    let last = null;
-    for (let k = 0; k + 1 < points.length; k += 1) {
-      const [a, b] = [points[k], points[k + 1]];
-      const cover = here.filter((span) => span.start <= a && span.end >= b);
-      const claimed = cover.filter((span) => span.claim !== undefined).sort((p, q) => (p.end - p.start) - (q.end - q.start));
-      const pick = claimed[0] || cover.find((span) => span.link) || null;
-      const text = raw.slice(a, b);
-      if (pick && last && last.pick === pick) {
-        last.node.append(text);
+    const groups = new Map();
+    const links = [];
+    for (const span of spans) {
+      if (span.end <= from || span.start >= to) continue;
+      if (span.claim === undefined) {
+        links.push(span);
         continue;
       }
-      let node;
-      if (!pick) node = document.createTextNode(text);
-      else if (pick.claim !== undefined) node = claimMark(pick.claim, text);
-      else node = el("a", { class: "keylink", href: "#", "data-source": pick.link.sources[0], title: "Open this source" }, text);
-      out.push(node);
-      last = { pick, node };
+      const key = `${span.start}:${span.end}`;
+      if (!groups.has(key)) groups.set(key, { start: span.start, end: span.end, claims: [] });
+      groups.get(key).claims.push(span.claim);
     }
+    const claimed = [...groups.values()];
+    const free = links.filter((link) => !claimed.some((group) => group.start < link.end && link.start < group.end));
+    return nested(raw, from, to, [...claimed, ...free]);
+  }
+
+  function nested(raw, from, to, spans) {
+    const here = spans.filter((span) => span.end > from && span.start < to)
+      .sort((a, b) => a.start - b.start || (b.end - b.start) - (a.end - a.start));
+    const out = [];
+    let at = from;
+    while (here.length) {
+      const span = here.shift();
+      const start = Math.max(span.start, at);
+      const end = Math.min(span.end, to);
+      if (end <= start) continue;
+      if (start > at) out.push(raw.slice(at, start));
+      // What stands wholly inside this span is marked inside it; what only overlaps it is cut to start after it.
+      const inner = [];
+      for (let i = here.length - 1; i >= 0; i -= 1) {
+        if (here[i].start < end && here[i].end <= end) inner.unshift(...here.splice(i, 1));
+      }
+      const children = nested(raw, start, end, inner);
+      out.push(span.claims ? group(span.claims, children)
+        : el("a", { class: "keylink", href: "#", "data-source": span.link.sources[0], title: "Open this source" }, children));
+      at = end;
+    }
+    if (at < to) out.push(raw.slice(at, to));
     return out;
   }
 
-  function claimMark(index, text) {
-    const c = claims()[index];
+  // One mark for the claims on the same characters: the claim shown, if it's one of them, else the worst. Clicking it
+  // again steps to the next of them.
+  function group(indexes, children) {
+    const order = VERDICTS.map(([verdict]) => verdict);
+    const shown = indexes.includes(S.cur) && S.browse === null ? S.cur
+      : [...indexes].sort((a, b) => order.indexOf(claims()[a].verdict) - order.indexOf(claims()[b].verdict))[0];
+    const c = claims()[shown];
     const classes = ["hl", `v-${VCLASS[c.verdict]}`];
-    if (index === S.cur && S.browse === null) classes.push("cur");
+    if (shown === S.cur && S.browse === null) classes.push("cur");
     if (c.mark) classes.push(`m-${c.mark.mark}`);
     if (c.stale) classes.push("stale");
-    const said = `${CHECKS[c.check] || c.check}: ${VWORD[c.verdict]}, ${words(c.status)}` + (c.mark ? `. Marked: ${c.mark.mark}` : "");
-    return el("mark", { class: classes.join(" "), "data-claim": index, title: said }, text);
+    const each = indexes.map((index) => {
+      const one = claims()[index];
+      return `${CHECKS[one.check] || one.check}: ${VWORD[one.verdict]}, ${words(one.status)}` + (one.mark ? `. Marked: ${one.mark.mark}` : "");
+    });
+    const said = each.join("\n") + (indexes.length > 1 ? "\nClick again for the next." : "");
+    return el("mark", { class: classes.join(" "), "data-claim": shown, "data-claims": indexes.join(","), title: said }, children);
   }
 
   // ---- the source
@@ -589,11 +612,23 @@
           });
         })));
     }
-    if (c.check === "sections") {
-      return el("div", { class: "note-card" }, el("h3", { text: "A section of the note" }), el("p", { text: c.detail }));
+    const card = (title, ...body) => el("div", { class: "note-card" }, el("h3", { text: title }), body);
+    if (c.check === "sections") return card("A section of the note", el("p", { text: c.detail }));
+    if (c.check === "waivers") {
+      return card("A waiver in checks/waivers.csv", el("p", { text: c.detail }),
+        el("p", { class: "muted small", text: "Edit or remove the row in that file; the page doesn't change waivers it didn't write." }));
     }
-    return el("div", { class: "note-card" }, el("h3", { text: "No passage to show" }),
-      el("p", { text: c.keys.length ? "The sources this line cites have no address the review knows of." : "This line cites no source." }));
+    if (c.status.startsWith("input")) {
+      const working = claims().findIndex((other) => other.note === c.note && other.line === c.line && other.check === "arithmetic");
+      return card("An input of a worked-out figure", el("p", { text: c.detail }),
+        working >= 0 ? el("button", { type: "button", class: "btn", "data-claim": working }, "See the working") : null);
+    }
+    if (c.check === "citations") {
+      return card("A source key with no address", el("p", { text: c.detail }),
+        el("p", { class: "muted small", text: "Give the key an entry with an address in the note's Sources list, or in the note it borrows from." }));
+    }
+    return card("No passage to show", el("p", { text: c.detail || (c.keys.length
+      ? "The sources this line cites have no address the review knows of." : "This line cites no source, so there's no passage to set beside it.") }));
   }
 
   function snapStart(text, at) {
@@ -985,7 +1020,10 @@
       return;
     }
     if (data.claim !== undefined) {
-      choose(Number(data.claim));
+      let next = Number(data.claim);
+      const together = (data.claims || "").split(",").filter(Boolean).map(Number);
+      if (together.length > 1 && next === S.cur) next = together[(together.indexOf(S.cur) + 1) % together.length];
+      choose(next);
       $("#queue").classList.remove("open");
       return;
     }
@@ -1050,7 +1088,7 @@
   }
 
   function onKey(event) {
-    const typing = event.target.matches("input[type=text], textarea, select");
+    const typing = event.target instanceof Element && event.target.matches("input[type=text], textarea, select");
     if (event.key === "Escape") {
       if ($("#help").open) return;
       if (S.form) {

@@ -5,6 +5,7 @@ Each works on a copy of the fictional example with notes of its own, its source 
 import contextlib
 import csv
 import http.client
+import http.server
 import json
 import shutil
 import tempfile
@@ -33,6 +34,7 @@ NOTES = """# Notes: Northbridge Robotics
 - The year called for "discipline ahead of growth" (S1).
 - Net income was $12.4M (S1 p.1).
 - It was a year of "Discipline before Growth" (S1).
+- The brief asks for "a full account of the year" (S1).
 
 ## 2. Worked out
 
@@ -59,6 +61,8 @@ class Reviewed(unittest.TestCase):
         shutil.copytree(CODE_ROOT / "example", root, ignore=shutil.ignore_patterns("data"))
         self.note = root / "research" / "01_northbridge.md"
         self.note.write_bytes(NOTES.replace("\n", "\r\n").encode("utf-8"))
+        with (root / "workspace.toml").open("a", encoding="utf-8") as settings:
+            settings.write('\n[check.quotations]\nnot_sources = ["brief"]\n')
         self.ws = workspace.Workspace(root, "test")
         with self.connected() as con:
             sourcedb.record_sources(self.ws, con)
@@ -144,6 +148,13 @@ class Suggestions(Reviewed):
         self.assertIn("capitals", quote.views[0].said)
         # The first letter may be fitted to the sentence, so the note's is kept.
         self.assertEqual(quote.suggestion.new, '- It was a year of "Discipline before growth" (S1).')
+
+    def test_a_quotation_of_a_document_that_isnt_a_source_isnt_looked_for(self):
+        quote = self.claim(self.gathered(), "quotations", "a full account of the year")
+        self.assertEqual((quote.verdict, quote.status), (research.NOT_JUDGED, "quotes_a_non_source"))
+        self.assertEqual([view.hits for view in quote.views], [()])
+        self.assertIn("isn't a source", quote.views[0].said)
+        self.assertIsNone(quote.suggestion)
 
     def test_no_passage_is_offered_when_none_is_close(self):
         with self.connected() as con:
@@ -318,6 +329,16 @@ class Served(Reviewed):
         self.assertEqual(status, 409)
         self.assertIn("Recheck", json.loads(raw)["error"])
         self.assertEqual(self.ask("POST", "/api/mark", {"claim": {**ref, "line": "x"}, "mark": "agrees", "by": "AR"})[0], 400)
+
+    def test_a_port_another_server_holds_is_left_to_it(self):
+        # On Windows, two servers that each ask to reuse an address, as the standard library's does, could share a port,
+        # and a request would reach either one. Here the port is held by such a server, as an earlier review would hold it.
+        taken = http.server.HTTPServer(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler)
+        self.addCleanup(taken.server_close)
+        port = taken.server_address[1]
+        server = review_server.serve(self.app, port)
+        server.server_close()
+        self.assertNotEqual(self.app.port, port)
 
     def test_the_server_answers_on_this_computer(self):
         server = review_server.serve(self.app, 0)

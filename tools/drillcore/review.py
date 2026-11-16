@@ -372,7 +372,12 @@ def figure_view(texts: Texts, source: int, url: str, written: str, pin: pages.Pi
     count = len(places)
     said = f"Found {HOW.get(kind, kind)}, at {count} place{'' if count == 1 else 's'}"
     if region and pin:
-        said += f"; {len(inside)} of them at {pin.where}" if inside else f", none at {pin.where}"
+        if not inside:
+            said += f", none at {pin.where}"
+        elif len(inside) == count:
+            said += f", {'all ' if count > 1 else ''}at {pin.where}"
+        else:
+            said += f", {len(inside)} of them at {pin.where}"
     elif where:
         said += f". Pinpoint: {where}"
     return View(source, tuple(hits), label_spans(texts, url, stems, hits), tuple(region), said + ".")
@@ -801,6 +806,12 @@ class Builder:
             # The detail of a quotation found is the address it was found at, which the view says better.
             claim.detail = ""
         pins = self.pins(r.note, r.line_no)
+        claim.source_sha = self.source_sha(urls)
+        if r.status == "quotes_a_non_source":
+            # The workspace says the quotation is of a document that isn't a source, so nothing is looked for.
+            claim.views = [View(self.ids[url], said="The note attributes this quotation to a document the workspace says isn't a "
+                                "source, so it isn't looked for in the sources the line cites.") for url in urls if url in self.ids]
+            return claim
         for url in [matched] if matched else urls:
             if url not in self.ids:
                 continue
@@ -839,7 +850,6 @@ class Builder:
                     claim.suggestion = quote_suggestion(raw, r.line_no, r.item, text[start:end], key)
             else:
                 claim.views.append(View(self.ids[url], (), (), tuple(region), "No passage of this source is close to the quotation."))
-        claim.source_sha = self.source_sha(urls)
         return claim
 
     def arithmetic(self, r: research.Result) -> Claim:
