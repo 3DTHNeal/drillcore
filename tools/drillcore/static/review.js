@@ -86,6 +86,8 @@
   }
 
   const words = (status) => String(status || "").replace(/_/g, " ");
+  // A claim as its line writes it, where the check names it another way ("551.1 百万" for 551100000).
+  const shownAs = (c) => c.written || c.item || words(c.status);
   const claims = () => (S.state ? S.state.claims : []);
   const claim = () => claims()[S.cur] || null;
   const lineKey = (note, line) => `${note}\u0000${line}`;
@@ -132,7 +134,8 @@
     try {
       response = await fetch(path, options);
     } catch {
-      throw new Error("The review server isn't answering. Is the review command still running?");
+      const command = S.state ? `${S.state.slug} review` : "the review command";
+      throw new Error(`The review server isn't answering. Is \`${command}\` still running? Start it again to carry on; marks and edits made so far are kept.`);
     }
     let data = null;
     try {
@@ -153,11 +156,16 @@
     S.busy = true;
     document.body.classList.add("busy");
     const keep = claim() ? { ...claimRef(claim()), index: S.cur } : null;
+    // The checks run again after each change, which takes seconds for a long filing: say so if it isn't quick.
+    const slow = setTimeout(() => toast(path === "/api/mark" ? "Saving the mark…" : "Running the checks again…", { stay: true }), 500);
     try {
       const data = await api(path, body);
+      clearTimeout(slow);
       setState(data, keep, path === "/api/recheck");
+      if (!$("#toast").hidden && $("#toast").dataset.stay) $("#toast").hidden = true;
       if (done) done(data);
     } catch (problem) {
+      clearTimeout(slow);
       toast(problem.message, { error: true });
     } finally {
       S.busy = false;
@@ -350,7 +358,7 @@
     return el("button", { type: "button", class: `qitem${index === S.cur ? " cur" : ""}`, "data-claim": index,
       title: `${CHECKS[c.check] || c.check}: ${VWORD[c.verdict]} (${words(c.status)})` },
       el("span", { class: `dot v-${VCLASS[c.verdict]}` }),
-      el("span", { class: "qtext", text: c.item || words(c.status) }),
+      el("span", { class: "qtext", text: shownAs(c) }),
       el("span", { class: "qmeta", text: `${CHECKS[c.check] || c.check} · ${where} · ${words(c.status)}` }),
       markIcon);
   }
@@ -763,7 +771,7 @@
     const parts = [el("div", { class: "bar-head" },
       el("span", { class: `pill v-${VCLASS[c.verdict]}` }, el("span", { class: `dot v-${VCLASS[c.verdict]}` }), VWORD[c.verdict]),
       el("span", { class: "tag", text: CHECKS[c.check] || c.check }),
-      el("span", { class: "bar-item", text: c.item || words(c.status), title: c.item }),
+      el("span", { class: "bar-item", text: shownAs(c), title: c.written ? `${c.written}, read by the check as ${c.item}` : c.item }),
       el("span", { class: "bar-where", text: where }),
       el("span", { class: "bar-nav" },
         el("button", { type: "button", class: "icon-btn", "data-step": "-1", title: "Previous claim (k)", "aria-label": "Previous claim" }, "‹"),
@@ -1003,9 +1011,14 @@
       options.undo ? el("button", { type: "button", class: "linkish", "data-act": "undo" }, "Undo") : null].filter(Boolean));
     box.hidden = false;
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => {
-      box.hidden = true;
-    }, options.error ? 9000 : 6000);
+    // A notice that stays is taken down when what it waits on is done; any other goes after a few seconds.
+    if (options.stay) box.dataset.stay = "1";
+    else delete box.dataset.stay;
+    if (!options.stay) {
+      toastTimer = setTimeout(() => {
+        box.hidden = true;
+      }, options.error ? 9000 : 6000);
+    }
   }
 
   // ---------------------------------------------------------------- wiring
@@ -1024,7 +1037,7 @@
       const together = (data.claims || "").split(",").filter(Boolean).map(Number);
       if (together.length > 1 && next === S.cur) next = together[(together.indexOf(S.cur) + 1) % together.length];
       choose(next);
-      $("#queue").classList.remove("open");
+      drawer(false);
       return;
     }
     if (data.verdict !== undefined) {
@@ -1091,6 +1104,11 @@
     const typing = event.target instanceof Element && event.target.matches("input[type=text], textarea, select");
     if (event.key === "Escape") {
       if ($("#help").open) return;
+      if ($("#queue").classList.contains("open")) {
+        drawer(false);
+        event.preventDefault();
+        return;
+      }
       if (S.form) {
         S.form = null;
         S.editLine = null;
@@ -1160,11 +1178,13 @@
     $("#recheck").addEventListener("click", recheck);
     $("#help-open").addEventListener("click", () => $("#help").showModal());
     $("#help-close").addEventListener("click", () => $("#help").close());
-    $("#queue-toggle").addEventListener("click", () => {
-      const queue = $("#queue");
-      queue.classList.toggle("open");
-      $("#queue-toggle").setAttribute("aria-expanded", String(queue.classList.contains("open")));
-    });
+    $("#queue-toggle").addEventListener("click", () => drawer(!$("#queue").classList.contains("open")));
+  }
+
+  // On a narrow screen the list of claims is a drawer: open it, or close it, and say which to a screen reader.
+  function drawer(open) {
+    $("#queue").classList.toggle("open", open);
+    $("#queue-toggle").setAttribute("aria-expanded", String(open));
   }
 
   async function start() {

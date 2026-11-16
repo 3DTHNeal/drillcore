@@ -46,7 +46,7 @@ from typing import Any
 from assay import numbers as assay_numbers
 
 from . import arithmetic as arithmetic_check
-from . import inventory, pages, research, waivers
+from . import cjk, inventory, pages, research, waivers
 from .quotes import GAP, INLINE
 from .sourcedb import KEY_TOKEN, URL, Held, NoteLine, clean_url, doc_numbers, find_number, note_files, note_lines, record_sources, table_headers
 from .workspace import Workspace
@@ -151,6 +151,8 @@ class Claim:
     mark: Mark | None = None
     # Why the mark needs another look, or "" when it holds.
     stale: str = ""
+    # The claim as its line writes it, where the check names it otherwise: "551.1 百万" for 551100000.
+    written: str = ""
 
     def same(self, note: str, line_no: int, check: str, item: str) -> bool:
         return (self.note, self.line_no, self.check, squeeze(self.item)) == (note, line_no, check, squeeze(item))
@@ -185,7 +187,7 @@ def claim_json(number: int, claim: Claim) -> dict[str, Any]:
         "keys": list(claim.keys), "waiver": claim.waiver,
         "views": [{"source": v.source, "hits": [list(h) for h in v.hits], "labels": [list(s) for s in v.labels],
                    "region": [list(s) for s in v.region], "said": v.said} for v in claim.views],
-        "suggestion": None, "working": claim.working, "mark": None, "stale": claim.stale,
+        "suggestion": None, "working": claim.working, "mark": None, "stale": claim.stale, "written": claim.written,
     }
     if claim.suggestion:
         s = claim.suggestion
@@ -529,6 +531,51 @@ def page_suggestion(con: sqlite3.Connection, line: str, line_no: int, pin: pages
                       word_diff(line[cited.start():cited.end()], f"{pin.key} p.{page[0]}"))
 
 
+def section_suggestion(line: str, line_no: int, pin: pages.Pin, text: str, at: int) -> Suggestion | None:
+    """The line with a section pinpoint naming the section the source holds the figure or quotation in: the last heading
+    numbered the cited section's way before it, as "Note 13" for "Note 12", offered only when `pages` reads that
+    section as holding the place. None for a section named by words alone, or a pinpoint that isn't on this line."""
+    numbered = pages.NUMBERED.fullmatch(pin.section)
+    if not numbered:
+        return None
+    word = (numbered.group("word") or "").rstrip(".")
+    if word:
+        heading = re.compile(rf"^[ \t]*{re.escape(word)}\.?\s*(\d+(?:\.\d+)*[A-Za-z]?)(?![\w.]?\d)", re.IGNORECASE | re.MULTILINE)
+    else:
+        depth = numbered.group("number").count(".")
+        heading = re.compile(rf"^[ \t]*(\d+(?:\.\d+){{{depth}}})[.)]?\s+(?=[A-Z])", re.MULTILINE)
+    before = list(heading.finditer(text, 0, at))
+    last = before[-1] if before else None
+    cited = next((m for m in pages.PIN.finditer(line) if m.group("key") == pin.key and m.group("section")), None)
+    if last is None or cited is None:
+        return None
+    section = f"{word} {last.group(1)}" if word else last.group(1)
+    stretches, _ = pages.section_region(text, pages.Pin(pin.key, section=section))
+    if not stretches or not pages.within(stretches, at) or section == pin.section:
+        return None
+    new = line[:cited.start("section")] + section + line[cited.end("section"):]
+    return Suggestion(line_no, line, new, f"The stored copy holds it in section {section}.",
+                      word_diff(line[cited.start():cited.end()], line[cited.start():cited.start("section")] + section))
+
+
+def pin_suggestion(con: sqlite3.Connection, line: str, line_no: int, pin: pages.Pin, url: str, text: str, at: int) -> Suggestion | None:
+    """The line with its pinpoint naming the page or section the source holds the figure or quotation in."""
+    return section_suggestion(line, line_no, pin, text, at) if pin.section else page_suggestion(con, line, line_no, pin, url, at)
+
+
+def cjk_place(line: str, written: str, at: int = 0) -> tuple[int, int] | None:
+    """Where a line writes, in a unit of ten-thousands or hundred-millions, a figure `cjk` wrote out in full: "551.1 百万"
+    for 551100000. A check reads the figure written out, so its finding names that, and not what the line shows."""
+    digits = DIGITS.search(written)
+    if not digits:
+        return None
+    wanted = digits.group(0).replace(",", "")
+    for match in cjk.FIGURE.finditer(line, at):
+        if wanted in cjk.in_digits(match.group(0)).replace(",", "").split("-"):
+            return match.span()
+    return None
+
+
 # ---------------------------------------------------------------- marks
 
 def read_marks(ws: Workspace) -> list[Mark]:
@@ -622,13 +669,24 @@ def writable(ws: Workspace) -> None:
                           "Make a workspace of your own to review (`init`), and point at it.")
 
 
+def note_path(ws: Workspace, note: str) -> Path:
+    path = next((p for p in note_files(ws) if p.name == note), None)
+    if path is None:
+        raise ReviewError(f"{note} isn't a note in this workspace.")
+    return path
+
+
+def lines_reading(ws: Workspace, note: str, text: str) -> list[int]:
+    """The numbers of the lines of a note that read exactly `text`."""
+    lines = note_path(ws, note).read_bytes().decode("utf-8").splitlines()
+    return [number for number, line in enumerate(lines, 1) if line == text]
+
+
 def edit_line(ws: Workspace, note: str, line_no: int, old: str, new: str) -> None:
     """Write one line of a note anew, in place of `old`. Refuses when the line on disk isn't `old` any more, so an edit
     made elsewhere since the page was loaded is never written over, and refuses a line break in `new`."""
     writable(ws)
-    path = next((p for p in note_files(ws) if p.name == note), None)
-    if path is None:
-        raise ReviewError(f"{note} isn't a note in this workspace.")
+    path = note_path(ws, note)
     # Any character Python splits lines at would make two lines of one, and move every line after it.
     if new and new.splitlines() != [new]:
         raise ReviewError("A line can't hold a line break. Edit one line at a time.")
@@ -836,7 +894,7 @@ class Builder:
                 elif away:
                     said = f"The words stand here, but not at {away}."
                     if pin and claim.suggestion is None:
-                        claim.suggestion = page_suggestion(self.con, raw, r.line_no, pin, url, spans[0][0])
+                        claim.suggestion = pin_suggestion(self.con, raw, r.line_no, pin, url, text, spans[0][0])
                 else:
                     said = "The quotation's words stand here."
                 claim.views.append(View(self.ids[url], hits, (), tuple(region), said))
@@ -881,7 +939,7 @@ class Builder:
         searchable = blank_keys(raw, self.checks.urls.get(note, {}))
         for quantity in quantities:
             own = next((r for r in results if r.item and r.item == quantity.text), None)
-            span = place(searchable, quantity.text, at)
+            span = place(searchable, quantity.text, at) or cjk_place(searchable, quantity.text, at)
             if span:
                 at = span[1]
             if own:
@@ -897,13 +955,16 @@ class Builder:
             elif urls:
                 claim.views = [View(self.ids[url], said="The row's figures weren't looked for in this source: "
                                     + (claim.detail or research.VERDICT[claim.status])) for url in urls if url in self.ids]
-            if claim.status == "not_on_cited_page":
+            if claim.status in ("not_on_cited_page", "not_in_cited_section"):
                 for url in urls:
                     hits = [view.hits for view in claim.views if view.source == self.ids.get(url) and view.hits]
                     pin = pins.get(url)
                     if hits and pin:
-                        claim.suggestion = page_suggestion(self.con, raw, line_no, pin, url, hits[0][0][0])
+                        claim.suggestion = pin_suggestion(self.con, raw, line_no, pin, url, self.texts.text(url) or "", hits[0][0][0])
                         break
+            if span and raw[span[0]:span[1]] != claim.item:
+                # The check names the figure as it read it, 551100000 for "551.1 百万": the page shows the line's own.
+                claim.written = raw[span[0]:span[1]]
             claim.line_sha, claim.source_sha = line_sha, source_sha
             made.append(claim)
         if not quantities:

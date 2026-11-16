@@ -199,11 +199,18 @@ class App:
         self.refresh()
 
     def undo_last(self, asked: dict[str, Any]) -> None:
+        """Put back the last line the page changed: where it was, or where it is now if lines above it were added or
+        taken out since. A line changed again since, or written twice over, can't be told apart, so it's left as it
+        is, and the change is dropped from what can be undone, saying so."""
         if not self.undo:
             raise review.ReviewError("Nothing to undo.")
-        note, line, old, new = self.undo[-1]
-        review.edit_line(self.ws, note, line, new, old)
-        self.undo.pop()
+        note, line, old, new = self.undo.pop()
+        found = review.lines_reading(self.ws, note, new)
+        at = line if line in found else found[0] if len(found) == 1 else None
+        if at is None:
+            raise review.ReviewError(f"Line {line} of {note} has been changed again since the page changed it, so it wasn't put "
+                                     "back. Nothing was written.")
+        review.edit_line(self.ws, note, at, new, old)
         self.refresh()
 
 

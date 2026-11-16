@@ -184,6 +184,21 @@ class Suggestions(Reviewed):
         self.assertIn("away from page 1", loss.views[0].hits[0][2])
         self.assertTrue(loss.views[0].region)
 
+    def test_a_figure_in_another_section_is_offered_that_section(self):
+        text = "Note 12 Segment information\nSegment revenue 300.5\n\nNote 13 Other income\nOther income 12.9\n"
+        line = "- Other income was 12.9 (S1 §Note 12)."
+        found = review.section_suggestion(line, 4, review.pages.Pin("S1", section="Note 12"), text, text.index("12.9"))
+        self.assertEqual(found.new, "- Other income was 12.9 (S1 §Note 13).")
+        self.assertEqual(found.diff, (("equal", "S1 §Note"), ("delete", "12"), ("insert", "13")))
+        # Before any heading numbered that way, nothing is offered.
+        self.assertIsNone(review.section_suggestion(line, 4, review.pages.Pin("S1", section="Note 12"), "Other income 12.9\n", 13))
+
+    def test_a_figure_a_line_writes_in_chinese_units_is_placed_as_written(self):
+        line = "- 收入 551.1 百万美元 (S1)."
+        start, end = review.cjk_place(line, "551100000")
+        self.assertEqual(line[start:end], "551.1 百万")
+        self.assertIsNone(review.cjk_place(line, "551100001"))
+
     def test_a_figure_is_written_again_as_the_working_gives_it(self):
         self.assertEqual(review.figure_written("-3.9%", -3.738), "-3.7%")
         self.assertEqual(review.figure_written("+12.0%", -1.04), "-1.0%")
@@ -317,6 +332,24 @@ class Served(Reviewed):
         self.assertEqual(self.ask("POST", "/api/undo", {})[0], 200)
         self.assertEqual(self.line(s["line"]), s["old"])
         self.assertEqual(self.ask("POST", "/api/undo", {})[0], 409)
+
+    def test_an_undo_finds_its_line_after_lines_move_and_leaves_one_changed_again(self):
+        state = json.loads(self.ask("GET", "/api/state")[2])
+        s = next(c for c in state["claims"] if c["check"] == "quotations")["suggestion"]
+        self.assertEqual(self.ask("POST", "/api/edit", {"note": "01_northbridge.md", "line": s["line"], "old": s["old"], "new": s["new"]})[0], 200)
+        # A line added above it from outside the page: the line to put back is one further down.
+        self.note.write_bytes(b"Added above.\r\n" + self.note.read_bytes())
+        status, _, raw = self.ask("POST", "/api/undo", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.line(s["line"] + 1), s["old"])
+        self.assertFalse(json.loads(raw)["canUndo"])
+        # Changed again since the page changed it: left as it is, and no longer offered to undo.
+        self.ask("POST", "/api/edit", {"note": "01_northbridge.md", "line": s["line"] + 1, "old": s["old"], "new": s["new"]})
+        self.note.write_bytes(self.note.read_bytes().replace(s["new"].encode(), b"- Rewritten by hand."))
+        status, _, raw = self.ask("POST", "/api/undo", {})
+        self.assertEqual(status, 409)
+        self.assertIn("changed again", json.loads(raw)["error"])
+        self.assertFalse(json.loads(self.ask("GET", "/api/state")[2])["canUndo"])
 
     def test_a_mark_is_made_and_a_stale_page_is_told(self):
         state = json.loads(self.ask("GET", "/api/state")[2])
