@@ -149,8 +149,11 @@
 
   // What names a claim to the server. The status tells apart two claims on the same item, as a Sources entry that is
   // both unused and not fetched.
+  // The line as the page shows it goes too, so a mark or a waiver isn't written against a line changed since.
   function claimRef(c) {
-    return { note: c.note, line: c.line, check: c.check, item: c.item, status: c.status };
+    const note = S.state.notes.find((n) => n.file === c.note);
+    const seen = (note && c.line > 0 && note.lines[c.line - 1]) || "";
+    return { note: c.note, line: c.line, check: c.check, item: c.item, status: c.status, seen };
   }
 
   async function act(path, body, done) {
@@ -356,14 +359,23 @@
       }
     }
     if (!groups.length) {
-      list.replaceChildren(el("p", { class: "empty", text: claims().length ? "No claim matches what's shown. Turn a verdict back on above." :
-        "Nothing to review: the checks judged no claim. Fetch the sources the notes cite, then recheck." }));
+      list.replaceChildren(el("p", { class: "empty", text: claims().length ? "No claim matches what's shown. Turn a verdict back on above." : nothingYet() }));
       return;
     }
     list.replaceChildren(...groups.map(([title, members]) => el("section", { class: "group" },
       el("h3", {}, el("span", { text: title }), el("span", { text: members.length })),
       el("ol", {}, members.map((index) => el("li", {}, queueItem(index)))))));
     if (scroll) reveal(list, list.querySelector(".qitem.cur"), true);
+  }
+
+  // Why there's nothing to review, and what to do: write notes, or cite and fetch their sources.
+  function nothingYet() {
+    if (!S.state.notes.length) {
+      return "There are no notes yet. Put them, as Markdown files, in the workspace's notes folder (research/, unless " +
+        "workspace.toml names another), then recheck.";
+    }
+    return "Nothing to review: the checks judged no claim. Cite a source on each row with a figure, run " +
+      `\`${S.state.slug} sources\` and \`${S.state.slug} fetch\`, then recheck.`;
   }
 
   function queueItem(index) {
@@ -818,8 +830,7 @@
       return;
     }
     if (!c) {
-      bar.replaceChildren(el("p", { class: "why muted", text: claims().length ? "Choose a claim from the list or the note." :
-        "Nothing to review yet. The checks judged no claim: cite a source on each row, fetch the sources, then recheck." }));
+      bar.replaceChildren(el("p", { class: "why muted", text: claims().length ? "Choose a claim from the list or the note." : nothingYet() }));
       return;
     }
     const order = visibleOrder();

@@ -108,6 +108,10 @@ class App:
                                     str(asked.get("item", "")), str(asked.get("status", "")))
         if found is None:
             raise Refused(HTTPStatus.CONFLICT, "That claim isn't in the review any more. Recheck, then try again.")
+        # A page loaded before its line changed would otherwise mark, or accept, a line the person never saw.
+        if "seen" in asked and review.sha(str(asked["seen"]).strip()) != found.line_sha:
+            raise Refused(HTTPStatus.CONFLICT, f"Line {found.line_no} of {found.note} has changed since the page was loaded, so "
+                          "nothing was written. Recheck, then look at it again.")
         return found
 
     # ---- requests

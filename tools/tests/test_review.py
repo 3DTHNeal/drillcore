@@ -35,6 +35,7 @@ NOTES = """# Notes: Northbridge Robotics
 - Net income was $12.4M (S1 p.1).
 - It was a year of "Discipline before Growth" (S1).
 - The brief asks for "a full account of the year" (S1).
+- 📈 Orders are 8x what they were (S1).
 
 ## 2. Worked out
 
@@ -46,11 +47,16 @@ COMPUTED from the table above:
 
 - **S1.** Northbridge Robotics. 2026. *Annual Report 2025.* https://example.com/northbridge/annual-2025.html
 """
-PAGE = b"""<html><head><title>Annual Report 2025</title></head><body><p>In thousands of dollars.</p>
+PAGE = """<html><head><meta charset="utf-8"><title>Annual Report 2025</title></head><body><p>In thousands of dollars. 📈</p>
 <table><tr><th>Revenue</th><td>551,102</td><td>572,514</td></tr><tr><th>Staff</th><td>1,757</td><td>1,820</td></tr></table>
 <p>Research spending was $77.3 million. The year called for discipline before growth, and it came.</p>
 <p>&lt;script&gt;alert(1)&lt;/script&gt;</p>
-<p>The company recorded a net loss of $12.4 million.</p></body></html>"""
+<p>The company recorded a net loss of $12.4 million.</p></body></html>""".encode()
+
+
+def as_the_page_slices(text: str, start: int, end: int) -> str:
+    """text[start:end] as the page's script slices it, counting UTF-16 units."""
+    return text.encode("utf-16-le")[2 * start:2 * end].decode("utf-16-le")
 
 
 class Reviewed(unittest.TestCase):
@@ -121,6 +127,25 @@ class Claims(Reviewed):
         keys = [link for link in found.links if line[link["line"] - 1][link["start"]:link["end"]] == "S1"]
         self.assertTrue(keys)
         self.assertEqual({found.sources[link["sources"][0]].url for link in keys}, {ANNUAL})
+
+    def test_places_are_counted_as_the_page_counts_them(self):
+        # An emoji is one character to Python and two to the page's script; one before a figure mustn't move its mark.
+        data = self.gathered().to_json()
+        lines = {note["file"]: note["lines"] for note in data["notes"]}
+        eight = next(c for c in data["claims"] if c["item"] == "8x")
+        self.assertEqual(as_the_page_slices(lines[eight["note"]][eight["line"] - 1], eight["start"], eight["end"]), "8x")
+        staff = next(c for c in data["claims"] if c["item"] == "1,757")
+        start, end, _ = staff["views"][0]["hits"][0]
+        self.assertEqual(as_the_page_slices(self.text(), start, end), "1,757")
+        with self.connected() as con:
+            pages = review.source_text(con, ANNUAL)["pages"]
+        self.assertTrue(as_the_page_slices(self.text(), pages[1][1], pages[1][2]).startswith("The company recorded"))
+
+    def test_two_readings_of_the_same_characters_are_both_placed(self):
+        found = self.gathered()
+        claims = [c for c in found.claims if c.check == "numbers" and c.item in ("8", "8x")]
+        line = found.notes["01_northbridge.md"][claims[0].line_no - 1]
+        self.assertEqual(sorted(line[c.start:c.end] for c in claims), ["8", "8x"])
 
     def test_the_review_writes_no_report(self):
         self.gathered()
@@ -378,6 +403,17 @@ class Served(Reviewed):
         self.assertEqual(status, 409)
         self.assertIn("changed again", json.loads(raw)["error"])
         self.assertFalse(json.loads(self.ask("GET", "/api/state")[2])["canUndo"])
+
+    def test_a_mark_from_a_page_that_showed_another_line_is_refused(self):
+        state = json.loads(self.ask("GET", "/api/state")[2])
+        staff = next(c for c in state["claims"] if c["item"] == "1,757")
+        ref = {key: staff[key] for key in ("note", "line", "check", "item", "status")}
+        shown = next(n["lines"] for n in state["notes"] if n["file"] == staff["note"])[staff["line"] - 1]
+        status, _, raw = self.ask("POST", "/api/mark", {"claim": {**ref, "seen": shown.replace("1,820", "1,821")}, "mark": "agrees", "by": "AR"})
+        self.assertEqual(status, 409)
+        self.assertIn("changed since the page was loaded", json.loads(raw)["error"])
+        self.assertEqual(review.read_marks(self.ws), [])
+        self.assertEqual(self.ask("POST", "/api/mark", {"claim": {**ref, "seen": shown}, "mark": "agrees", "by": "AR"})[0], 200)
 
     def test_a_mark_is_made_and_a_stale_page_is_told(self):
         state = json.loads(self.ask("GET", "/api/state")[2])

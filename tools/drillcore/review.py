@@ -34,7 +34,7 @@ import sqlite3
 import tempfile
 from array import array
 from bisect import bisect_left
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -166,6 +166,8 @@ class Review:
     sources: list[Source]
     links: list[dict[str, Any]]
     claims: list[Claim]
+    # Where each source's text holds a character outside the Basic Multilingual Plane, by source id (`astral_places`).
+    astral: dict[int, list[int]] = field(default_factory=dict)
 
     def find(self, note: str, line_no: int, check: str, item: str, status: str = "") -> Claim | None:
         """The claim named, and of two on the same item, such as a Sources entry both unused and not fetched, the one
@@ -174,22 +176,59 @@ class Review:
         return next((claim for claim in same if claim.status == status), same[0] if same else None)
 
     def to_json(self) -> dict[str, Any]:
+        """The review as the page reads it. Every place in a line or a source is counted as the page's script counts
+        it, in UTF-16 units (`in_utf16`), not as Python does, so an emoji before a figure doesn't move its mark."""
+        lines = {name: [astral_places(line) for line in note] for name, note in self.notes.items()}
+
+        def on_line(note: str, line_no: int, at: int) -> int:
+            places = lines.get(note, [])
+            return in_utf16(places[line_no - 1] if 0 < line_no <= len(places) else [], at)
+
+        def in_source(source: int, at: int) -> int:
+            return in_utf16(self.astral.get(source, []), at)
+
         return {
-            "notes": [{"file": name, "lines": lines} for name, lines in self.notes.items()],
+            "notes": [{"file": name, "lines": note} for name, note in self.notes.items()],
             "sources": [{"id": s.id, "url": s.url, "title": s.title, "keys": list(s.keys), "status": s.status,
                          "fetchedAt": s.fetched_at, "sha256": s.sha256, "chars": s.chars, "kind": s.kind} for s in self.sources],
-            "links": self.links,
-            "claims": [claim_json(number, claim) for number, claim in enumerate(self.claims)],
+            "links": [{**link, "start": on_line(link["note"], link["line"], link["start"]),
+                       "end": on_line(link["note"], link["line"], link["end"])} for link in self.links],
+            "claims": [claim_json(number, claim, on_line, in_source) for number, claim in enumerate(self.claims)],
         }
 
 
-def claim_json(number: int, claim: Claim) -> dict[str, Any]:
+ASTRAL = re.compile("[\U00010000-\U0010ffff]")
+
+
+def astral_places(text: str) -> list[int]:
+    """Where a text holds a character outside the Basic Multilingual Plane, such as an emoji or a mathematical letter:
+    one character to Python, two to the page's script."""
+    return [match.start() for match in ASTRAL.finditer(text)]
+
+
+def in_utf16(places: list[int], at: int) -> int:
+    """A place in a text, counted in UTF-16 units: one more for each character before it outside the Basic Multilingual
+    Plane (`astral_places`). A place of -1, for no place, stays as it is."""
+    return at + bisect_left(places, at) if places and at >= 0 else at
+
+
+def claim_json(number: int, claim: Claim, on_line: Callable[[str, int, int], int] | None = None,
+               in_source: Callable[[int, int], int] | None = None) -> dict[str, Any]:
+    """A claim as the page reads it, with its places counted as `on_line` and `in_source` count them; as they are when
+    neither is given."""
+    line = on_line or (lambda note, line_no, at: at)
+    source = in_source or (lambda source_id, at: at)
+
+    def spans(view: View, stretches: tuple[tuple[int, int], ...]) -> list[list[int]]:
+        return [[source(view.source, start), source(view.source, end)] for start, end in stretches]
+
     out: dict[str, Any] = {
-        "id": f"c{number}", "note": claim.note, "line": claim.line_no, "start": claim.start, "end": claim.end,
+        "id": f"c{number}", "note": claim.note, "line": claim.line_no,
+        "start": line(claim.note, claim.line_no, claim.start), "end": line(claim.note, claim.line_no, claim.end),
         "check": claim.check, "status": claim.status, "verdict": claim.verdict, "item": claim.item, "detail": claim.detail,
         "keys": list(claim.keys), "waiver": claim.waiver,
-        "views": [{"source": v.source, "hits": [list(h) for h in v.hits], "labels": [list(s) for s in v.labels],
-                   "region": [list(s) for s in v.region], "said": v.said} for v in claim.views],
+        "views": [{"source": v.source, "hits": [[source(v.source, s), source(v.source, e), how] for s, e, how in v.hits],
+                   "labels": spans(v, v.labels), "region": spans(v, v.region), "said": v.said} for v in claim.views],
         "suggestion": None, "working": claim.working, "mark": None, "stale": claim.stale, "written": claim.written,
     }
     if claim.suggestion:
@@ -794,7 +833,8 @@ def gather(ws: Workspace, con: sqlite3.Connection, kept: Kept | None = None) -> 
     found = research.results(ws, con, workings, kept.sources)
     builder = Builder(ws, con, workings, kept.sources, kept.texts)
     claims = builder.claims(found)
-    review = Review(builder.notes, builder.sources, builder.links(), claims)
+    astral = {source.id: places for source in builder.sources if (places := astral_places(kept.texts.text(source.url) or ""))}
+    review = Review(builder.notes, builder.sources, builder.links(), claims, astral)
     apply_marks(review, read_marks(ws))
     return review
 
@@ -962,12 +1002,22 @@ class Builder:
         source_sha = self.source_sha(urls)
         made: list[Claim] = []
         at = 0
+        taken: set[tuple[int, int, str]] = set()
         searchable = blank_keys(raw, self.checks.urls.get(note, {}))
         for quantity in quantities:
             own = next((r for r in results if r.item and r.item == quantity.text), None)
-            span = place(searchable, quantity.text, at) or cjk_place(searchable, quantity.text, at)
+            # Two readings can share characters, as the 8 and the 8x of "8x" do, so each is looked for from where the one
+            # before it starts; a place another figure written the same way has taken is passed over.
+            span = None
+            look = at
+            while (found := place(searchable, quantity.text, look) or cjk_place(searchable, quantity.text, look)) is not None:
+                if (found[0], found[1], quantity.text) not in taken:
+                    span = found
+                    break
+                look = found[0] + 1
             if span:
-                at = span[1]
+                at = span[0]
+                taken.add((span[0], span[1], quantity.text))
             if own:
                 claim = self.claim(own, span, quantity.text)
             elif row_level.item:
@@ -1030,5 +1080,7 @@ def source_text(con: sqlite3.Connection, url: str) -> dict[str, Any]:
     """A source's stored text, with where each page starts and ends and the number printed on it, for the page to show."""
     row = con.execute("SELECT title, text FROM documents WHERE url=?", (url,)).fetchone()
     pages_kept = con.execute("SELECT page, start, end_at, folio FROM document_pages WHERE url=? ORDER BY page", (url,)).fetchall()
-    return {"url": url, "title": (row[0] if row else "") or "", "text": (row[1] if row else None),
-            "pages": [[page, start, end, folio or ""] for page, start, end, folio in pages_kept]}
+    text = (row[1] if row else None) or None
+    places = astral_places(text or "")
+    return {"url": url, "title": (row[0] if row else "") or "", "text": text,
+            "pages": [[page, in_utf16(places, start), in_utf16(places, end), folio or ""] for page, start, end, folio in pages_kept]}
