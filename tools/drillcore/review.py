@@ -167,8 +167,11 @@ class Review:
     links: list[dict[str, Any]]
     claims: list[Claim]
 
-    def find(self, note: str, line_no: int, check: str, item: str) -> Claim | None:
-        return next((claim for claim in self.claims if claim.same(note, line_no, check, item)), None)
+    def find(self, note: str, line_no: int, check: str, item: str, status: str = "") -> Claim | None:
+        """The claim named, and of two on the same item, such as a Sources entry both unused and not fetched, the one
+        with this status."""
+        same = [claim for claim in self.claims if claim.same(note, line_no, check, item)]
+        return next((claim for claim in same if claim.status == status), same[0] if same else None)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -578,21 +581,30 @@ def cjk_place(line: str, written: str, at: int = 0) -> tuple[int, int] | None:
 
 # ---------------------------------------------------------------- marks
 
-def read_marks(ws: Workspace) -> list[Mark]:
-    """The workspace's marks, or [] when it has none. A row that starts with # is left out, as in the waivers file."""
+def mark_of(row: dict[str, str]) -> Mark | None:
+    """A row of the marks file as a mark, or None for one that isn't: a row that starts with #, as in the waivers file,
+    or one whose mark or line can't be read."""
+    values = {column: (row.get(column) or "").strip() for column in COLUMNS}
+    if values["note_file"].startswith("#") or values["mark"] not in MARKS or not values["line_no"].isdigit():
+        return None
+    return Mark(values["note_file"], int(values["line_no"]), values["check"], values["item"], values["mark"], values["comment"],
+                values["marked_by"], values["marked_on"], values["line_sha"], values["source_sha"])
+
+
+def marks_file(ws: Workspace) -> tuple[list[str], list[dict[str, str]]]:
+    """The marks file's columns and rows as written, or the columns a new one has and no rows."""
     path = ws.root / FILE
     if not path.is_file():
-        return []
+        return list(COLUMNS), []
     with path.open(encoding="utf-8-sig", newline="") as source:
-        rows = list(csv.DictReader(source))
-    found = []
-    for row in rows:
-        values = {column: (row.get(column) or "").strip() for column in COLUMNS}
-        if values["note_file"].startswith("#") or values["mark"] not in MARKS or not values["line_no"].isdigit():
-            continue
-        found.append(Mark(values["note_file"], int(values["line_no"]), values["check"], values["item"], values["mark"],
-                          values["comment"], values["marked_by"], values["marked_on"], values["line_sha"], values["source_sha"]))
-    return found
+        reader = csv.DictReader(source)
+        rows = list(reader)
+        return list(reader.fieldnames or COLUMNS), rows
+
+
+def read_marks(ws: Workspace) -> list[Mark]:
+    """The workspace's marks, or [] when it has none. A row that isn't one (`mark_of`) is passed over."""
+    return [mark for mark in map(mark_of, marks_file(ws)[1]) if mark is not None]
 
 
 def write_atomically(path: Path, text: str) -> None:
@@ -608,11 +620,11 @@ def write_atomically(path: Path, text: str) -> None:
         raise
 
 
-def write_marks(ws: Workspace, marks: list[Mark]) -> None:
+def write_marks(ws: Workspace, columns: list[str], rows: list[dict[str, str]]) -> None:
     buffer = io.StringIO()
-    writer = csv.writer(buffer, lineterminator="\n")
-    writer.writerow(COLUMNS)
-    writer.writerows([m.note, m.line_no, m.check, m.item, m.mark, m.comment, m.by, m.on, m.line_sha, m.source_sha] for m in marks)
+    writer = csv.DictWriter(buffer, fieldnames=columns, lineterminator="\n", restval="", extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(rows)
     write_atomically(ws.root / FILE, buffer.getvalue())
 
 
@@ -637,20 +649,34 @@ def apply_marks(review: Review, marks: list[Mark]) -> None:
 
 def set_mark(ws: Workspace, claim: Claim, mark: str, comment: str, by: str, today: str | None = None) -> list[Mark]:
     """Record a person's mark on a claim, in place of any mark it had, or with mark "" take its mark away. Returns the
-    marks as written."""
+    marks as written. Every other row is kept as it was, a row that isn't a mark (`mark_of`) and any column of the
+    file's own among them, since the file is plain text a person may edit by hand too. A file whose first line doesn't
+    name the columns isn't written to."""
+    writable(ws)
     if mark and mark not in MARKS:
         raise ReviewError(f"A mark is one of {', '.join(MARKS)}, not {mark!r}.")
     if mark == DISAGREES and not comment.strip():
         raise ReviewError("Say what the source says instead, so whoever fixes the note knows.")
     if mark and not by.strip():
         raise ReviewError("Say who's marking it: a name or initials.")
-    kept = [m for m in read_marks(ws) if not (m.note == claim.note and m.check == claim.check and squeeze(m.item) == squeeze(claim.item)
-                                                and (m.line_no == claim.line_no or m.line_sha == claim.line_sha))]
+    columns, rows = marks_file(ws)
+    if not set(COLUMNS) <= set(columns):
+        raise ReviewError(f"{FILE.as_posix()} doesn't start with the columns {', '.join(COLUMNS)}, so the mark wasn't written. "
+                          "Put that line back at its top, or move the file away.")
+
+    def this_claims(row: dict[str, str]) -> bool:
+        found = mark_of(row)
+        return found is not None and found.note == claim.note and found.check == claim.check and \
+            squeeze(found.item) == squeeze(claim.item) and (found.line_no == claim.line_no or found.line_sha == claim.line_sha)
+
+    kept = [row for row in rows if not this_claims(row)]
     if mark:
-        kept.append(Mark(claim.note, claim.line_no, claim.check, claim.item, mark, one_line(comment), one_line(by),
-                         today or date.today().isoformat(), claim.line_sha, claim.source_sha))
-    write_marks(ws, kept)
-    return kept
+        made = Mark(claim.note, claim.line_no, claim.check, claim.item, mark, one_line(comment), one_line(by),
+                    today or date.today().isoformat(), claim.line_sha, claim.source_sha)
+        kept.append(dict(zip(COLUMNS, (made.note, str(made.line_no), made.check, made.item, made.mark, made.comment, made.by,
+                                       made.on, made.line_sha, made.source_sha), strict=True)))
+    write_marks(ws, columns, kept)
+    return [found for found in map(mark_of, kept) if found is not None]
 
 
 def one_line(text: str) -> str:

@@ -105,7 +105,7 @@ class App:
         if not isinstance(asked, dict):
             raise Refused(HTTPStatus.BAD_REQUEST, "Name the claim by its note, line, check and item.")
         found = self.current().find(str(asked.get("note", "")), int(asked.get("line", 0) or 0), str(asked.get("check", "")),
-                                    str(asked.get("item", "")))
+                                    str(asked.get("item", "")), str(asked.get("status", "")))
         if found is None:
             raise Refused(HTTPStatus.CONFLICT, "That claim isn't in the review any more. Recheck, then try again.")
         return found

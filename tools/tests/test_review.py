@@ -229,6 +229,34 @@ class Marks(Reviewed):
             con.commit()
         self.assertIn("the text of a source", self.claim(self.gathered(), "numbers", "1,757").stale)
 
+    def test_a_mark_keeps_every_other_row_of_the_file_as_written(self):
+        path = self.ws.root / review.FILE
+        path.parent.mkdir(exist_ok=True)
+        path.write_text("note_file,line_no,check,item,mark,comment,marked_by,marked_on,line_sha,source_sha,ticket\n"
+                        "01_northbridge.md,7,numbers,551.1,agree,typed by hand,AR,2026-11-14,,,T-12\n"
+                        "# a comment row,,,,,,,,,,\n", encoding="utf-8")
+        review.set_mark(self.ws, self.claim(self.gathered(), "numbers", "1,757"), "agrees", "", "AR", today="2026-11-15")
+        with path.open(encoding="utf-8", newline="") as kept:
+            rows = list(csv.DictReader(kept))
+        self.assertEqual([row["item"] for row in rows], ["551.1", "", "1,757"])
+        self.assertEqual((rows[0]["mark"], rows[0]["ticket"], rows[1]["note_file"]), ("agree", "T-12", "# a comment row"))
+
+    def test_a_marks_file_without_its_columns_is_left_alone(self):
+        path = self.ws.root / review.FILE
+        path.parent.mkdir(exist_ok=True)
+        path.write_text("not,a,marks,file\n1,2,3,4\n", encoding="utf-8")
+        with self.assertRaisesRegex(review.ReviewError, "columns"):
+            review.set_mark(self.ws, self.claim(self.gathered(), "numbers", "1,757"), "agrees", "", "AR")
+        self.assertEqual(path.read_text(encoding="utf-8"), "not,a,marks,file\n1,2,3,4\n")
+        self.assertEqual(review.read_marks(self.ws), [])
+
+    def test_two_claims_on_one_item_are_told_apart_by_status(self):
+        unused = review.Claim("01_northbridge.md", 9, 3, 5, "citations", "unused", research.WARN, "S5", "", ("S5",))
+        unfetched = review.Claim("01_northbridge.md", 9, 3, 5, "citations", "not_fetched", research.NOT_JUDGED, "S5", "", ("S5",))
+        found = review.Review({}, [], [], [unfetched, unused])
+        self.assertIs(found.find("01_northbridge.md", 9, "citations", "S5", "unused"), unused)
+        self.assertIs(found.find("01_northbridge.md", 9, "citations", "S5"), unfetched)
+
     def test_a_disagreement_says_what_the_source_says_and_who_says_so(self):
         claim = self.claim(self.gathered(), "numbers", "$77.3M")
         with self.assertRaises(review.ReviewError):

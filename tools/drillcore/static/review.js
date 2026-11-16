@@ -147,8 +147,10 @@
     return data;
   }
 
+  // What names a claim to the server. The status tells apart two claims on the same item, as a Sources entry that is
+  // both unused and not fetched.
   function claimRef(c) {
-    return { note: c.note, line: c.line, check: c.check, item: c.item };
+    return { note: c.note, line: c.line, check: c.check, item: c.item, status: c.status };
   }
 
   async function act(path, body, done) {
@@ -188,6 +190,8 @@
   function setState(data, keep, reread) {
     const first = S.state === null;
     S.state = data;
+    // Each new state is drawn whole once; stepping between claims after that only moves what marks the current one.
+    S.version = (S.version || 0) + 1;
     if (reread) S.texts.clear();
     S.byLine = new Map();
     data.claims.forEach((c, index) => {
@@ -211,8 +215,11 @@
 
   function findClaim(keep) {
     const list = claims();
-    const exact = list.findIndex((c) => c.note === keep.note && c.line === keep.line && c.check === keep.check && c.item === keep.item);
+    const same = (c) => c.note === keep.note && c.line === keep.line && c.check === keep.check && c.item === keep.item;
+    const exact = list.findIndex((c) => same(c) && c.status === keep.status);
     if (exact >= 0) return exact;
+    const item = list.findIndex(same);
+    if (item >= 0) return item;
     const sameCheck = list.findIndex((c) => c.note === keep.note && c.line === keep.line && c.check === keep.check);
     if (sameCheck >= 0) return sameCheck;
     const sameLine = list.findIndex((c) => c.note === keep.note && c.line === keep.line);
@@ -313,6 +320,16 @@
     $("#only-open").checked = S.filters.open;
     $("#group-by").value = S.filters.group;
 
+    const list = $("#queue-list");
+    const drawn = `${S.version}|${[...S.filters.off].sort().join(",")}|${S.filters.open}|${S.filters.group}`;
+    if (S.queueDrawn === drawn) {
+      list.querySelectorAll(".qitem.cur").forEach((node) => node.classList.remove("cur"));
+      const current = list.querySelector(`.qitem[data-claim="${S.cur}"]`);
+      if (current) current.classList.add("cur");
+      if (scroll) reveal(list, current, true);
+      return;
+    }
+    S.queueDrawn = drawn;
     const order = visibleOrder();
     const groups = [];
     if (S.filters.group === "source") {
@@ -328,13 +345,16 @@
         if (members.length) groups.push([word, members]);
       }
     } else {
-      const notes = [...S.state.notes.map((note) => note.file), ""];
-      for (const note of notes) {
+      // The notes in the workspace, then any a finding names that isn't among them now (a waiver for a note moved
+      // away), then findings about the workspace as a whole.
+      const present = S.state.notes.map((note) => note.file);
+      const named = claims().map((c) => c.note).filter((note) => note && !present.includes(note));
+      for (const note of [...present, ...new Set(named), ""]) {
         const members = order.filter((index) => claims()[index].note === note);
-        if (members.length) groups.push([note || "The workspace", members]);
+        if (!members.length) continue;
+        groups.push([!note ? "The workspace" : present.includes(note) ? note : `${note} (not among the notes now)`, members]);
       }
     }
-    const list = $("#queue-list");
     if (!groups.length) {
       list.replaceChildren(el("p", { class: "empty", text: claims().length ? "No claim matches what's shown. Turn a verdict back on above." :
         "Nothing to review: the checks judged no claim. Fetch the sources the notes cite, then recheck." }));
@@ -365,14 +385,40 @@
 
   // ---- the note
 
+  // Move what marks the current claim in the note drawn, without drawing it again. False when it can't be moved that
+  // way: when the claim shown or the one before it shares a mark with another, which mark shows which is redrawn.
+  function moveCurrent(doc) {
+    const shared = (index) => [...doc.querySelectorAll('mark[data-claims*=","]')]
+      .some((node) => node.dataset.claims.split(",").map(Number).includes(index));
+    if (shared(S.drawnCur) || shared(S.cur)) return false;
+    doc.querySelectorAll("mark.cur, .gm.cur").forEach((node) => node.classList.remove("cur"));
+    doc.querySelectorAll(".cur-line").forEach((node) => node.classList.remove("cur-line"));
+    const c = claim();
+    if (S.browse === null && c && c.note === S.note) {
+      doc.querySelectorAll(`mark[data-claim="${S.cur}"], .gm[data-claim="${S.cur}"]`).forEach((node) => node.classList.add("cur"));
+      doc.querySelectorAll(`[data-line="${c.line}"]`).forEach((node) => node.classList.add("cur-line"));
+    }
+    return true;
+  }
+
   function renderDoc(scroll) {
+    const doc = $("#doc");
+    const drawn = `${S.version}|${S.note}`;
+    if (S.docDrawn === drawn && moveCurrent(doc)) {
+      S.drawnCur = S.cur;
+      if (scroll) reveal(doc, doc.querySelector(".cur-line"));
+      return;
+    }
+    S.docDrawn = drawn;
+    S.drawnCur = S.cur;
     const pick = $("#note-pick");
     pick.replaceChildren(...S.state.notes.map((note) => el("option", { value: note.file, text: note.file })));
     pick.value = S.note;
-    const doc = $("#doc");
     const note = S.state.notes.find((n) => n.file === S.note);
     if (!note) {
-      doc.replaceChildren(el("p", { class: "empty", text: "There are no notes in this workspace." }));
+      doc.replaceChildren(el("p", { class: "empty", text: S.state.notes.length
+        ? `${S.note} isn't among the workspace's notes now: it may have been moved, renamed or skipped. Choose a note above.`
+        : "There are no notes in this workspace." }));
       $("#doc-meta").textContent = "";
       return;
     }
@@ -639,16 +685,25 @@
       ? "The sources this line cites have no address the review knows of." : "This line cites no source, so there's no passage to set beside it.") }));
   }
 
+  // Where a stretch of the source shown starts and ends: at a line's start or end if one is near, else between words.
+  // A page whose text has no line breaks would otherwise be shown whole, a megabyte at a time.
+  const NEAR_BREAK = 400;
+  const NEAR_SPACE = 80;
+
   function snapStart(text, at) {
     if (at <= 0) return 0;
-    const before = text.lastIndexOf("\n", at);
-    return before < 0 ? 0 : before + 1;
+    const line = text.lastIndexOf("\n", at);
+    if (line >= 0 && at - line <= NEAR_BREAK) return line + 1;
+    const space = text.lastIndexOf(" ", at);
+    return space >= 0 && at - space <= NEAR_SPACE ? space + 1 : at;
   }
 
   function snapEnd(text, at) {
     if (at >= text.length) return text.length;
-    const after = text.indexOf("\n", at);
-    return after < 0 ? text.length : after;
+    const line = text.indexOf("\n", at);
+    if (line >= 0 && line - at <= NEAR_BREAK) return line;
+    const space = text.indexOf(" ", at);
+    return space >= 0 && space - at <= NEAR_SPACE ? space : at;
   }
 
   function pageAt(pages, at) {
@@ -720,7 +775,9 @@
     if (start > 0) out.push(el("button", { type: "button", class: "btn more", "data-more": "before" }, `Show earlier text (${start.toLocaleString()} characters before)`));
     out.push(pre);
     if (end < text.length) out.push(el("button", { type: "button", class: "btn more", "data-more": "after" }, `Show later text (${(text.length - end).toLocaleString()} characters after)`));
-    if (start > 0 || end < text.length) out.push(el("button", { type: "button", class: "linkish more", "data-more": "all" }, "Show the whole text"));
+    if (start > 0 || end < text.length) {
+      out.push(el("button", { type: "button", class: "linkish more", "data-more": "all" }, `Show the whole text (${text.length.toLocaleString()} characters)`));
+    }
     const before = body.scrollHeight - body.scrollTop;
     body.replaceChildren(...out);
     if (scroll === "keep-bottom") {
