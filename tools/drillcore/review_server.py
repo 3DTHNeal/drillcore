@@ -21,7 +21,9 @@ mark in checks/review.csv, or a waiver in checks/waivers.csv. The example worksp
 import argparse
 import contextlib
 import json
+import os
 import secrets
+import socket
 import sys
 import webbrowser
 from collections.abc import Callable
@@ -103,9 +105,13 @@ class App:
         if not isinstance(asked, dict):
             raise Refused(HTTPStatus.BAD_REQUEST, "Name the claim by its note, line, check and item.")
         found = self.current().find(str(asked.get("note", "")), int(asked.get("line", 0) or 0), str(asked.get("check", "")),
-                                    str(asked.get("item", "")))
+                                    str(asked.get("item", "")), str(asked.get("status", "")))
         if found is None:
             raise Refused(HTTPStatus.CONFLICT, "That claim isn't in the review any more. Recheck, then try again.")
+        # A page loaded before its line changed would otherwise mark, or accept, a line the person never saw.
+        if "seen" in asked and review.sha(str(asked["seen"]).strip()) != found.line_sha:
+            raise Refused(HTTPStatus.CONFLICT, f"Line {found.line_no} of {found.note} has changed since the page was loaded, so "
+                          "nothing was written. Recheck, then look at it again.")
         return found
 
     # ---- requests
@@ -197,11 +203,18 @@ class App:
         self.refresh()
 
     def undo_last(self, asked: dict[str, Any]) -> None:
+        """Put back the last line the page changed: where it was, or where it is now if lines above it were added or
+        taken out since. A line changed again since, or written twice over, can't be told apart, so it's left as it
+        is, and the change is dropped from what can be undone, saying so."""
         if not self.undo:
             raise review.ReviewError("Nothing to undo.")
-        note, line, old, new = self.undo[-1]
-        review.edit_line(self.ws, note, line, new, old)
-        self.undo.pop()
+        note, line, old, new = self.undo.pop()
+        found = review.lines_reading(self.ws, note, new)
+        at = line if line in found else found[0] if len(found) == 1 else None
+        if at is None:
+            raise review.ReviewError(f"Line {line} of {note} has been changed again since the page changed it, so it wasn't put "
+                                     "back. Nothing was written.")
+        review.edit_line(self.ws, note, at, new, old)
         self.refresh()
 
 
@@ -234,12 +247,25 @@ class Handler(BaseHTTPRequestHandler):
         """Quiet: a request line names a note, and the terminal isn't the place for every one."""
 
 
+class Server(HTTPServer):
+    """The standard library's HTTP server, holding its port to itself. It asks to reuse an address, so a restart needn't
+    wait out the last one's closing; on Windows that lets a second server bind a port another is listening on, and a
+    request would reach either. There the port is asked for alone instead, so a taken port is refused and another found."""
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self) -> None:
+        alone = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+        if alone is not None:
+            self.socket.setsockopt(socket.SOL_SOCKET, alone, 1)
+        super().server_bind()
+
+
 def serve(app: App, port: int) -> HTTPServer:
     """A server for the app on 127.0.0.1, at the port given, or any free port when that one's taken."""
     try:
-        server = HTTPServer(("127.0.0.1", port), Handler)
+        server = Server(("127.0.0.1", port), Handler)
     except OSError:
-        server = HTTPServer(("127.0.0.1", 0), Handler)
+        server = Server(("127.0.0.1", 0), Handler)
     app.port = server.server_address[1]
     server.app = app  # type: ignore[attr-defined]
     return server

@@ -5,6 +5,7 @@ Each works on a copy of the fictional example with notes of its own, its source 
 import contextlib
 import csv
 import http.client
+import http.server
 import json
 import shutil
 import tempfile
@@ -33,6 +34,8 @@ NOTES = """# Notes: Northbridge Robotics
 - The year called for "discipline ahead of growth" (S1).
 - Net income was $12.4M (S1 p.1).
 - It was a year of "Discipline before Growth" (S1).
+- The brief asks for "a full account of the year" (S1).
+- 📈 Orders are 8x what they were (S1).
 
 ## 2. Worked out
 
@@ -44,11 +47,16 @@ COMPUTED from the table above:
 
 - **S1.** Northbridge Robotics. 2026. *Annual Report 2025.* https://example.com/northbridge/annual-2025.html
 """
-PAGE = b"""<html><head><title>Annual Report 2025</title></head><body><p>In thousands of dollars.</p>
+PAGE = """<html><head><meta charset="utf-8"><title>Annual Report 2025</title></head><body><p>In thousands of dollars. 📈</p>
 <table><tr><th>Revenue</th><td>551,102</td><td>572,514</td></tr><tr><th>Staff</th><td>1,757</td><td>1,820</td></tr></table>
 <p>Research spending was $77.3 million. The year called for discipline before growth, and it came.</p>
 <p>&lt;script&gt;alert(1)&lt;/script&gt;</p>
-<p>The company recorded a net loss of $12.4 million.</p></body></html>"""
+<p>The company recorded a net loss of $12.4 million.</p></body></html>""".encode()
+
+
+def as_the_page_slices(text: str, start: int, end: int) -> str:
+    """text[start:end] as the page's script slices it, counting UTF-16 units."""
+    return text.encode("utf-16-le")[2 * start:2 * end].decode("utf-16-le")
 
 
 class Reviewed(unittest.TestCase):
@@ -59,6 +67,8 @@ class Reviewed(unittest.TestCase):
         shutil.copytree(CODE_ROOT / "example", root, ignore=shutil.ignore_patterns("data"))
         self.note = root / "research" / "01_northbridge.md"
         self.note.write_bytes(NOTES.replace("\n", "\r\n").encode("utf-8"))
+        with (root / "workspace.toml").open("a", encoding="utf-8") as settings:
+            settings.write('\n[check.quotations]\nnot_sources = ["brief"]\n')
         self.ws = workspace.Workspace(root, "test")
         with self.connected() as con:
             sourcedb.record_sources(self.ws, con)
@@ -118,6 +128,25 @@ class Claims(Reviewed):
         self.assertTrue(keys)
         self.assertEqual({found.sources[link["sources"][0]].url for link in keys}, {ANNUAL})
 
+    def test_places_are_counted_as_the_page_counts_them(self):
+        # An emoji is one character to Python and two to the page's script; one before a figure mustn't move its mark.
+        data = self.gathered().to_json()
+        lines = {note["file"]: note["lines"] for note in data["notes"]}
+        eight = next(c for c in data["claims"] if c["item"] == "8x")
+        self.assertEqual(as_the_page_slices(lines[eight["note"]][eight["line"] - 1], eight["start"], eight["end"]), "8x")
+        staff = next(c for c in data["claims"] if c["item"] == "1,757")
+        start, end, _ = staff["views"][0]["hits"][0]
+        self.assertEqual(as_the_page_slices(self.text(), start, end), "1,757")
+        with self.connected() as con:
+            pages = review.source_text(con, ANNUAL)["pages"]
+        self.assertTrue(as_the_page_slices(self.text(), pages[1][1], pages[1][2]).startswith("The company recorded"))
+
+    def test_two_readings_of_the_same_characters_are_both_placed(self):
+        found = self.gathered()
+        claims = [c for c in found.claims if c.check == "numbers" and c.item in ("8", "8x")]
+        line = found.notes["01_northbridge.md"][claims[0].line_no - 1]
+        self.assertEqual(sorted(line[c.start:c.end] for c in claims), ["8", "8x"])
+
     def test_the_review_writes_no_report(self):
         self.gathered()
         self.assertFalse((self.ws.data / research.REPORT).exists())
@@ -144,6 +173,13 @@ class Suggestions(Reviewed):
         self.assertIn("capitals", quote.views[0].said)
         # The first letter may be fitted to the sentence, so the note's is kept.
         self.assertEqual(quote.suggestion.new, '- It was a year of "Discipline before growth" (S1).')
+
+    def test_a_quotation_of_a_document_that_isnt_a_source_isnt_looked_for(self):
+        quote = self.claim(self.gathered(), "quotations", "a full account of the year")
+        self.assertEqual((quote.verdict, quote.status), (research.NOT_JUDGED, "quotes_a_non_source"))
+        self.assertEqual([view.hits for view in quote.views], [()])
+        self.assertIn("isn't a source", quote.views[0].said)
+        self.assertIsNone(quote.suggestion)
 
     def test_no_passage_is_offered_when_none_is_close(self):
         with self.connected() as con:
@@ -172,6 +208,21 @@ class Suggestions(Reviewed):
         self.assertEqual(loss.suggestion.new, "- Net income was $12.4M (S1 p.2).")
         self.assertIn("away from page 1", loss.views[0].hits[0][2])
         self.assertTrue(loss.views[0].region)
+
+    def test_a_figure_in_another_section_is_offered_that_section(self):
+        text = "Note 12 Segment information\nSegment revenue 300.5\n\nNote 13 Other income\nOther income 12.9\n"
+        line = "- Other income was 12.9 (S1 §Note 12)."
+        found = review.section_suggestion(line, 4, review.pages.Pin("S1", section="Note 12"), text, text.index("12.9"))
+        self.assertEqual(found.new, "- Other income was 12.9 (S1 §Note 13).")
+        self.assertEqual(found.diff, (("equal", "S1 §Note"), ("delete", "12"), ("insert", "13")))
+        # Before any heading numbered that way, nothing is offered.
+        self.assertIsNone(review.section_suggestion(line, 4, review.pages.Pin("S1", section="Note 12"), "Other income 12.9\n", 13))
+
+    def test_a_figure_a_line_writes_in_chinese_units_is_placed_as_written(self):
+        line = "- 收入 551.1 百万美元 (S1)."
+        start, end = review.cjk_place(line, "551100000")
+        self.assertEqual(line[start:end], "551.1 百万")
+        self.assertIsNone(review.cjk_place(line, "551100001"))
 
     def test_a_figure_is_written_again_as_the_working_gives_it(self):
         self.assertEqual(review.figure_written("-3.9%", -3.738), "-3.7%")
@@ -202,6 +253,34 @@ class Marks(Reviewed):
             con.execute("UPDATE documents SET text = text || ' Restated.' WHERE url=?", (ANNUAL,))
             con.commit()
         self.assertIn("the text of a source", self.claim(self.gathered(), "numbers", "1,757").stale)
+
+    def test_a_mark_keeps_every_other_row_of_the_file_as_written(self):
+        path = self.ws.root / review.FILE
+        path.parent.mkdir(exist_ok=True)
+        path.write_text("note_file,line_no,check,item,mark,comment,marked_by,marked_on,line_sha,source_sha,ticket\n"
+                        "01_northbridge.md,7,numbers,551.1,agree,typed by hand,AR,2026-11-14,,,T-12\n"
+                        "# a comment row,,,,,,,,,,\n", encoding="utf-8")
+        review.set_mark(self.ws, self.claim(self.gathered(), "numbers", "1,757"), "agrees", "", "AR", today="2026-11-15")
+        with path.open(encoding="utf-8", newline="") as kept:
+            rows = list(csv.DictReader(kept))
+        self.assertEqual([row["item"] for row in rows], ["551.1", "", "1,757"])
+        self.assertEqual((rows[0]["mark"], rows[0]["ticket"], rows[1]["note_file"]), ("agree", "T-12", "# a comment row"))
+
+    def test_a_marks_file_without_its_columns_is_left_alone(self):
+        path = self.ws.root / review.FILE
+        path.parent.mkdir(exist_ok=True)
+        path.write_text("not,a,marks,file\n1,2,3,4\n", encoding="utf-8")
+        with self.assertRaisesRegex(review.ReviewError, "columns"):
+            review.set_mark(self.ws, self.claim(self.gathered(), "numbers", "1,757"), "agrees", "", "AR")
+        self.assertEqual(path.read_text(encoding="utf-8"), "not,a,marks,file\n1,2,3,4\n")
+        self.assertEqual(review.read_marks(self.ws), [])
+
+    def test_two_claims_on_one_item_are_told_apart_by_status(self):
+        unused = review.Claim("01_northbridge.md", 9, 3, 5, "citations", "unused", research.WARN, "S5", "", ("S5",))
+        unfetched = review.Claim("01_northbridge.md", 9, 3, 5, "citations", "not_fetched", research.NOT_JUDGED, "S5", "", ("S5",))
+        found = review.Review({}, [], [], [unfetched, unused])
+        self.assertIs(found.find("01_northbridge.md", 9, "citations", "S5", "unused"), unused)
+        self.assertIs(found.find("01_northbridge.md", 9, "citations", "S5"), unfetched)
 
     def test_a_disagreement_says_what_the_source_says_and_who_says_so(self):
         claim = self.claim(self.gathered(), "numbers", "$77.3M")
@@ -307,6 +386,35 @@ class Served(Reviewed):
         self.assertEqual(self.line(s["line"]), s["old"])
         self.assertEqual(self.ask("POST", "/api/undo", {})[0], 409)
 
+    def test_an_undo_finds_its_line_after_lines_move_and_leaves_one_changed_again(self):
+        state = json.loads(self.ask("GET", "/api/state")[2])
+        s = next(c for c in state["claims"] if c["check"] == "quotations")["suggestion"]
+        self.assertEqual(self.ask("POST", "/api/edit", {"note": "01_northbridge.md", "line": s["line"], "old": s["old"], "new": s["new"]})[0], 200)
+        # A line added above it from outside the page: the line to put back is one further down.
+        self.note.write_bytes(b"Added above.\r\n" + self.note.read_bytes())
+        status, _, raw = self.ask("POST", "/api/undo", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.line(s["line"] + 1), s["old"])
+        self.assertFalse(json.loads(raw)["canUndo"])
+        # Changed again since the page changed it: left as it is, and no longer offered to undo.
+        self.ask("POST", "/api/edit", {"note": "01_northbridge.md", "line": s["line"] + 1, "old": s["old"], "new": s["new"]})
+        self.note.write_bytes(self.note.read_bytes().replace(s["new"].encode(), b"- Rewritten by hand."))
+        status, _, raw = self.ask("POST", "/api/undo", {})
+        self.assertEqual(status, 409)
+        self.assertIn("changed again", json.loads(raw)["error"])
+        self.assertFalse(json.loads(self.ask("GET", "/api/state")[2])["canUndo"])
+
+    def test_a_mark_from_a_page_that_showed_another_line_is_refused(self):
+        state = json.loads(self.ask("GET", "/api/state")[2])
+        staff = next(c for c in state["claims"] if c["item"] == "1,757")
+        ref = {key: staff[key] for key in ("note", "line", "check", "item", "status")}
+        shown = next(n["lines"] for n in state["notes"] if n["file"] == staff["note"])[staff["line"] - 1]
+        status, _, raw = self.ask("POST", "/api/mark", {"claim": {**ref, "seen": shown.replace("1,820", "1,821")}, "mark": "agrees", "by": "AR"})
+        self.assertEqual(status, 409)
+        self.assertIn("changed since the page was loaded", json.loads(raw)["error"])
+        self.assertEqual(review.read_marks(self.ws), [])
+        self.assertEqual(self.ask("POST", "/api/mark", {"claim": {**ref, "seen": shown}, "mark": "agrees", "by": "AR"})[0], 200)
+
     def test_a_mark_is_made_and_a_stale_page_is_told(self):
         state = json.loads(self.ask("GET", "/api/state")[2])
         staff = next(c for c in state["claims"] if c["item"] == "1,757")
@@ -318,6 +426,16 @@ class Served(Reviewed):
         self.assertEqual(status, 409)
         self.assertIn("Recheck", json.loads(raw)["error"])
         self.assertEqual(self.ask("POST", "/api/mark", {"claim": {**ref, "line": "x"}, "mark": "agrees", "by": "AR"})[0], 400)
+
+    def test_a_port_another_server_holds_is_left_to_it(self):
+        # On Windows, two servers that each ask to reuse an address, as the standard library's does, could share a port,
+        # and a request would reach either one. Here the port is held by such a server, as an earlier review would hold it.
+        taken = http.server.HTTPServer(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler)
+        self.addCleanup(taken.server_close)
+        port = taken.server_address[1]
+        server = review_server.serve(self.app, port)
+        server.server_close()
+        self.assertNotEqual(self.app.port, port)
 
     def test_the_server_answers_on_this_computer(self):
         server = review_server.serve(self.app, 0)

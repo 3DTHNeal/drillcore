@@ -34,7 +34,7 @@ import sqlite3
 import tempfile
 from array import array
 from bisect import bisect_left
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -46,7 +46,7 @@ from typing import Any
 from assay import numbers as assay_numbers
 
 from . import arithmetic as arithmetic_check
-from . import inventory, pages, research, waivers
+from . import cjk, inventory, pages, research, waivers
 from .quotes import GAP, INLINE
 from .sourcedb import KEY_TOKEN, URL, Held, NoteLine, clean_url, doc_numbers, find_number, note_files, note_lines, record_sources, table_headers
 from .workspace import Workspace
@@ -151,6 +151,8 @@ class Claim:
     mark: Mark | None = None
     # Why the mark needs another look, or "" when it holds.
     stale: str = ""
+    # The claim as its line writes it, where the check names it otherwise: "551.1 百万" for 551100000.
+    written: str = ""
 
     def same(self, note: str, line_no: int, check: str, item: str) -> bool:
         return (self.note, self.line_no, self.check, squeeze(self.item)) == (note, line_no, check, squeeze(item))
@@ -164,28 +166,70 @@ class Review:
     sources: list[Source]
     links: list[dict[str, Any]]
     claims: list[Claim]
+    # Where each source's text holds a character outside the Basic Multilingual Plane, by source id (`astral_places`).
+    astral: dict[int, list[int]] = field(default_factory=dict)
 
-    def find(self, note: str, line_no: int, check: str, item: str) -> Claim | None:
-        return next((claim for claim in self.claims if claim.same(note, line_no, check, item)), None)
+    def find(self, note: str, line_no: int, check: str, item: str, status: str = "") -> Claim | None:
+        """The claim named, and of two on the same item, such as a Sources entry both unused and not fetched, the one
+        with this status."""
+        same = [claim for claim in self.claims if claim.same(note, line_no, check, item)]
+        return next((claim for claim in same if claim.status == status), same[0] if same else None)
 
     def to_json(self) -> dict[str, Any]:
+        """The review as the page reads it. Every place in a line or a source is counted as the page's script counts
+        it, in UTF-16 units (`in_utf16`), not as Python does, so an emoji before a figure doesn't move its mark."""
+        lines = {name: [astral_places(line) for line in note] for name, note in self.notes.items()}
+
+        def on_line(note: str, line_no: int, at: int) -> int:
+            places = lines.get(note, [])
+            return in_utf16(places[line_no - 1] if 0 < line_no <= len(places) else [], at)
+
+        def in_source(source: int, at: int) -> int:
+            return in_utf16(self.astral.get(source, []), at)
+
         return {
-            "notes": [{"file": name, "lines": lines} for name, lines in self.notes.items()],
+            "notes": [{"file": name, "lines": note} for name, note in self.notes.items()],
             "sources": [{"id": s.id, "url": s.url, "title": s.title, "keys": list(s.keys), "status": s.status,
                          "fetchedAt": s.fetched_at, "sha256": s.sha256, "chars": s.chars, "kind": s.kind} for s in self.sources],
-            "links": self.links,
-            "claims": [claim_json(number, claim) for number, claim in enumerate(self.claims)],
+            "links": [{**link, "start": on_line(link["note"], link["line"], link["start"]),
+                       "end": on_line(link["note"], link["line"], link["end"])} for link in self.links],
+            "claims": [claim_json(number, claim, on_line, in_source) for number, claim in enumerate(self.claims)],
         }
 
 
-def claim_json(number: int, claim: Claim) -> dict[str, Any]:
+ASTRAL = re.compile("[\U00010000-\U0010ffff]")
+
+
+def astral_places(text: str) -> list[int]:
+    """Where a text holds a character outside the Basic Multilingual Plane, such as an emoji or a mathematical letter:
+    one character to Python, two to the page's script."""
+    return [match.start() for match in ASTRAL.finditer(text)]
+
+
+def in_utf16(places: list[int], at: int) -> int:
+    """A place in a text, counted in UTF-16 units: one more for each character before it outside the Basic Multilingual
+    Plane (`astral_places`). A place of -1, for no place, stays as it is."""
+    return at + bisect_left(places, at) if places and at >= 0 else at
+
+
+def claim_json(number: int, claim: Claim, on_line: Callable[[str, int, int], int] | None = None,
+               in_source: Callable[[int, int], int] | None = None) -> dict[str, Any]:
+    """A claim as the page reads it, with its places counted as `on_line` and `in_source` count them; as they are when
+    neither is given."""
+    line = on_line or (lambda note, line_no, at: at)
+    source = in_source or (lambda source_id, at: at)
+
+    def spans(view: View, stretches: tuple[tuple[int, int], ...]) -> list[list[int]]:
+        return [[source(view.source, start), source(view.source, end)] for start, end in stretches]
+
     out: dict[str, Any] = {
-        "id": f"c{number}", "note": claim.note, "line": claim.line_no, "start": claim.start, "end": claim.end,
+        "id": f"c{number}", "note": claim.note, "line": claim.line_no,
+        "start": line(claim.note, claim.line_no, claim.start), "end": line(claim.note, claim.line_no, claim.end),
         "check": claim.check, "status": claim.status, "verdict": claim.verdict, "item": claim.item, "detail": claim.detail,
         "keys": list(claim.keys), "waiver": claim.waiver,
-        "views": [{"source": v.source, "hits": [list(h) for h in v.hits], "labels": [list(s) for s in v.labels],
-                   "region": [list(s) for s in v.region], "said": v.said} for v in claim.views],
-        "suggestion": None, "working": claim.working, "mark": None, "stale": claim.stale,
+        "views": [{"source": v.source, "hits": [[source(v.source, s), source(v.source, e), how] for s, e, how in v.hits],
+                   "labels": spans(v, v.labels), "region": spans(v, v.region), "said": v.said} for v in claim.views],
+        "suggestion": None, "working": claim.working, "mark": None, "stale": claim.stale, "written": claim.written,
     }
     if claim.suggestion:
         s = claim.suggestion
@@ -372,7 +416,12 @@ def figure_view(texts: Texts, source: int, url: str, written: str, pin: pages.Pi
     count = len(places)
     said = f"Found {HOW.get(kind, kind)}, at {count} place{'' if count == 1 else 's'}"
     if region and pin:
-        said += f"; {len(inside)} of them at {pin.where}" if inside else f", none at {pin.where}"
+        if not inside:
+            said += f", none at {pin.where}"
+        elif len(inside) == count:
+            said += f", {'all ' if count > 1 else ''}at {pin.where}"
+        else:
+            said += f", {len(inside)} of them at {pin.where}"
     elif where:
         said += f". Pinpoint: {where}"
     return View(source, tuple(hits), label_spans(texts, url, stems, hits), tuple(region), said + ".")
@@ -524,23 +573,77 @@ def page_suggestion(con: sqlite3.Connection, line: str, line_no: int, pin: pages
                       word_diff(line[cited.start():cited.end()], f"{pin.key} p.{page[0]}"))
 
 
+def section_suggestion(line: str, line_no: int, pin: pages.Pin, text: str, at: int) -> Suggestion | None:
+    """The line with a section pinpoint naming the section the source holds the figure or quotation in: the last heading
+    numbered the cited section's way before it, as "Note 13" for "Note 12", offered only when `pages` reads that
+    section as holding the place. None for a section named by words alone, or a pinpoint that isn't on this line."""
+    numbered = pages.NUMBERED.fullmatch(pin.section)
+    if not numbered:
+        return None
+    word = (numbered.group("word") or "").rstrip(".")
+    if word:
+        heading = re.compile(rf"^[ \t]*{re.escape(word)}\.?\s*(\d+(?:\.\d+)*[A-Za-z]?)(?![\w.]?\d)", re.IGNORECASE | re.MULTILINE)
+    else:
+        depth = numbered.group("number").count(".")
+        heading = re.compile(rf"^[ \t]*(\d+(?:\.\d+){{{depth}}})[.)]?\s+(?=[A-Z])", re.MULTILINE)
+    before = list(heading.finditer(text, 0, at))
+    last = before[-1] if before else None
+    cited = next((m for m in pages.PIN.finditer(line) if m.group("key") == pin.key and m.group("section")), None)
+    if last is None or cited is None:
+        return None
+    section = f"{word} {last.group(1)}" if word else last.group(1)
+    stretches, _ = pages.section_region(text, pages.Pin(pin.key, section=section))
+    if not stretches or not pages.within(stretches, at) or section == pin.section:
+        return None
+    new = line[:cited.start("section")] + section + line[cited.end("section"):]
+    return Suggestion(line_no, line, new, f"The stored copy holds it in section {section}.",
+                      word_diff(line[cited.start():cited.end()], line[cited.start():cited.start("section")] + section))
+
+
+def pin_suggestion(con: sqlite3.Connection, line: str, line_no: int, pin: pages.Pin, url: str, text: str, at: int) -> Suggestion | None:
+    """The line with its pinpoint naming the page or section the source holds the figure or quotation in."""
+    return section_suggestion(line, line_no, pin, text, at) if pin.section else page_suggestion(con, line, line_no, pin, url, at)
+
+
+def cjk_place(line: str, written: str, at: int = 0) -> tuple[int, int] | None:
+    """Where a line writes, in a unit of ten-thousands or hundred-millions, a figure `cjk` wrote out in full: "551.1 百万"
+    for 551100000. A check reads the figure written out, so its finding names that, and not what the line shows."""
+    digits = DIGITS.search(written)
+    if not digits:
+        return None
+    wanted = digits.group(0).replace(",", "")
+    for match in cjk.FIGURE.finditer(line, at):
+        if wanted in cjk.in_digits(match.group(0)).replace(",", "").split("-"):
+            return match.span()
+    return None
+
+
 # ---------------------------------------------------------------- marks
 
-def read_marks(ws: Workspace) -> list[Mark]:
-    """The workspace's marks, or [] when it has none. A row that starts with # is left out, as in the waivers file."""
+def mark_of(row: dict[str, str]) -> Mark | None:
+    """A row of the marks file as a mark, or None for one that isn't: a row that starts with #, as in the waivers file,
+    or one whose mark or line can't be read."""
+    values = {column: (row.get(column) or "").strip() for column in COLUMNS}
+    if values["note_file"].startswith("#") or values["mark"] not in MARKS or not values["line_no"].isdigit():
+        return None
+    return Mark(values["note_file"], int(values["line_no"]), values["check"], values["item"], values["mark"], values["comment"],
+                values["marked_by"], values["marked_on"], values["line_sha"], values["source_sha"])
+
+
+def marks_file(ws: Workspace) -> tuple[list[str], list[dict[str, str]]]:
+    """The marks file's columns and rows as written, or the columns a new one has and no rows."""
     path = ws.root / FILE
     if not path.is_file():
-        return []
+        return list(COLUMNS), []
     with path.open(encoding="utf-8-sig", newline="") as source:
-        rows = list(csv.DictReader(source))
-    found = []
-    for row in rows:
-        values = {column: (row.get(column) or "").strip() for column in COLUMNS}
-        if values["note_file"].startswith("#") or values["mark"] not in MARKS or not values["line_no"].isdigit():
-            continue
-        found.append(Mark(values["note_file"], int(values["line_no"]), values["check"], values["item"], values["mark"],
-                          values["comment"], values["marked_by"], values["marked_on"], values["line_sha"], values["source_sha"]))
-    return found
+        reader = csv.DictReader(source)
+        rows = list(reader)
+        return list(reader.fieldnames or COLUMNS), rows
+
+
+def read_marks(ws: Workspace) -> list[Mark]:
+    """The workspace's marks, or [] when it has none. A row that isn't one (`mark_of`) is passed over."""
+    return [mark for mark in map(mark_of, marks_file(ws)[1]) if mark is not None]
 
 
 def write_atomically(path: Path, text: str) -> None:
@@ -556,11 +659,11 @@ def write_atomically(path: Path, text: str) -> None:
         raise
 
 
-def write_marks(ws: Workspace, marks: list[Mark]) -> None:
+def write_marks(ws: Workspace, columns: list[str], rows: list[dict[str, str]]) -> None:
     buffer = io.StringIO()
-    writer = csv.writer(buffer, lineterminator="\n")
-    writer.writerow(COLUMNS)
-    writer.writerows([m.note, m.line_no, m.check, m.item, m.mark, m.comment, m.by, m.on, m.line_sha, m.source_sha] for m in marks)
+    writer = csv.DictWriter(buffer, fieldnames=columns, lineterminator="\n", restval="", extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(rows)
     write_atomically(ws.root / FILE, buffer.getvalue())
 
 
@@ -585,20 +688,34 @@ def apply_marks(review: Review, marks: list[Mark]) -> None:
 
 def set_mark(ws: Workspace, claim: Claim, mark: str, comment: str, by: str, today: str | None = None) -> list[Mark]:
     """Record a person's mark on a claim, in place of any mark it had, or with mark "" take its mark away. Returns the
-    marks as written."""
+    marks as written. Every other row is kept as it was, a row that isn't a mark (`mark_of`) and any column of the
+    file's own among them, since the file is plain text a person may edit by hand too. A file whose first line doesn't
+    name the columns isn't written to."""
+    writable(ws)
     if mark and mark not in MARKS:
         raise ReviewError(f"A mark is one of {', '.join(MARKS)}, not {mark!r}.")
     if mark == DISAGREES and not comment.strip():
         raise ReviewError("Say what the source says instead, so whoever fixes the note knows.")
     if mark and not by.strip():
         raise ReviewError("Say who's marking it: a name or initials.")
-    kept = [m for m in read_marks(ws) if not (m.note == claim.note and m.check == claim.check and squeeze(m.item) == squeeze(claim.item)
-                                                and (m.line_no == claim.line_no or m.line_sha == claim.line_sha))]
+    columns, rows = marks_file(ws)
+    if not set(COLUMNS) <= set(columns):
+        raise ReviewError(f"{FILE.as_posix()} doesn't start with the columns {', '.join(COLUMNS)}, so the mark wasn't written. "
+                          "Put that line back at its top, or move the file away.")
+
+    def this_claims(row: dict[str, str]) -> bool:
+        found = mark_of(row)
+        return found is not None and found.note == claim.note and found.check == claim.check and \
+            squeeze(found.item) == squeeze(claim.item) and (found.line_no == claim.line_no or found.line_sha == claim.line_sha)
+
+    kept = [row for row in rows if not this_claims(row)]
     if mark:
-        kept.append(Mark(claim.note, claim.line_no, claim.check, claim.item, mark, one_line(comment), one_line(by),
-                         today or date.today().isoformat(), claim.line_sha, claim.source_sha))
-    write_marks(ws, kept)
-    return kept
+        made = Mark(claim.note, claim.line_no, claim.check, claim.item, mark, one_line(comment), one_line(by),
+                    today or date.today().isoformat(), claim.line_sha, claim.source_sha)
+        kept.append(dict(zip(COLUMNS, (made.note, str(made.line_no), made.check, made.item, made.mark, made.comment, made.by,
+                                       made.on, made.line_sha, made.source_sha), strict=True)))
+    write_marks(ws, columns, kept)
+    return [found for found in map(mark_of, kept) if found is not None]
 
 
 def one_line(text: str) -> str:
@@ -617,13 +734,24 @@ def writable(ws: Workspace) -> None:
                           "Make a workspace of your own to review (`init`), and point at it.")
 
 
+def note_path(ws: Workspace, note: str) -> Path:
+    path = next((p for p in note_files(ws) if p.name == note), None)
+    if path is None:
+        raise ReviewError(f"{note} isn't a note in this workspace.")
+    return path
+
+
+def lines_reading(ws: Workspace, note: str, text: str) -> list[int]:
+    """The numbers of the lines of a note that read exactly `text`."""
+    lines = note_path(ws, note).read_bytes().decode("utf-8").splitlines()
+    return [number for number, line in enumerate(lines, 1) if line == text]
+
+
 def edit_line(ws: Workspace, note: str, line_no: int, old: str, new: str) -> None:
     """Write one line of a note anew, in place of `old`. Refuses when the line on disk isn't `old` any more, so an edit
     made elsewhere since the page was loaded is never written over, and refuses a line break in `new`."""
     writable(ws)
-    path = next((p for p in note_files(ws) if p.name == note), None)
-    if path is None:
-        raise ReviewError(f"{note} isn't a note in this workspace.")
+    path = note_path(ws, note)
     # Any character Python splits lines at would make two lines of one, and move every line after it.
     if new and new.splitlines() != [new]:
         raise ReviewError("A line can't hold a line break. Edit one line at a time.")
@@ -705,7 +833,8 @@ def gather(ws: Workspace, con: sqlite3.Connection, kept: Kept | None = None) -> 
     found = research.results(ws, con, workings, kept.sources)
     builder = Builder(ws, con, workings, kept.sources, kept.texts)
     claims = builder.claims(found)
-    review = Review(builder.notes, builder.sources, builder.links(), claims)
+    astral = {source.id: places for source in builder.sources if (places := astral_places(kept.texts.text(source.url) or ""))}
+    review = Review(builder.notes, builder.sources, builder.links(), claims, astral)
     apply_marks(review, read_marks(ws))
     return review
 
@@ -801,6 +930,12 @@ class Builder:
             # The detail of a quotation found is the address it was found at, which the view says better.
             claim.detail = ""
         pins = self.pins(r.note, r.line_no)
+        claim.source_sha = self.source_sha(urls)
+        if r.status == "quotes_a_non_source":
+            # The workspace says the quotation is of a document that isn't a source, so nothing is looked for.
+            claim.views = [View(self.ids[url], said="The note attributes this quotation to a document the workspace says isn't a "
+                                "source, so it isn't looked for in the sources the line cites.") for url in urls if url in self.ids]
+            return claim
         for url in [matched] if matched else urls:
             if url not in self.ids:
                 continue
@@ -825,7 +960,7 @@ class Builder:
                 elif away:
                     said = f"The words stand here, but not at {away}."
                     if pin and claim.suggestion is None:
-                        claim.suggestion = page_suggestion(self.con, raw, r.line_no, pin, url, spans[0][0])
+                        claim.suggestion = pin_suggestion(self.con, raw, r.line_no, pin, url, text, spans[0][0])
                 else:
                     said = "The quotation's words stand here."
                 claim.views.append(View(self.ids[url], hits, (), tuple(region), said))
@@ -839,7 +974,6 @@ class Builder:
                     claim.suggestion = quote_suggestion(raw, r.line_no, r.item, text[start:end], key)
             else:
                 claim.views.append(View(self.ids[url], (), (), tuple(region), "No passage of this source is close to the quotation."))
-        claim.source_sha = self.source_sha(urls)
         return claim
 
     def arithmetic(self, r: research.Result) -> Claim:
@@ -868,12 +1002,22 @@ class Builder:
         source_sha = self.source_sha(urls)
         made: list[Claim] = []
         at = 0
+        taken: set[tuple[int, int, str]] = set()
         searchable = blank_keys(raw, self.checks.urls.get(note, {}))
         for quantity in quantities:
             own = next((r for r in results if r.item and r.item == quantity.text), None)
-            span = place(searchable, quantity.text, at)
+            # Two readings can share characters, as the 8 and the 8x of "8x" do, so each is looked for from where the one
+            # before it starts; a place another figure written the same way has taken is passed over.
+            span = None
+            look = at
+            while (found := place(searchable, quantity.text, look) or cjk_place(searchable, quantity.text, look)) is not None:
+                if (found[0], found[1], quantity.text) not in taken:
+                    span = found
+                    break
+                look = found[0] + 1
             if span:
-                at = span[1]
+                at = span[0]
+                taken.add((span[0], span[1], quantity.text))
             if own:
                 claim = self.claim(own, span, quantity.text)
             elif row_level.item:
@@ -887,13 +1031,16 @@ class Builder:
             elif urls:
                 claim.views = [View(self.ids[url], said="The row's figures weren't looked for in this source: "
                                     + (claim.detail or research.VERDICT[claim.status])) for url in urls if url in self.ids]
-            if claim.status == "not_on_cited_page":
+            if claim.status in ("not_on_cited_page", "not_in_cited_section"):
                 for url in urls:
                     hits = [view.hits for view in claim.views if view.source == self.ids.get(url) and view.hits]
                     pin = pins.get(url)
                     if hits and pin:
-                        claim.suggestion = page_suggestion(self.con, raw, line_no, pin, url, hits[0][0][0])
+                        claim.suggestion = pin_suggestion(self.con, raw, line_no, pin, url, self.texts.text(url) or "", hits[0][0][0])
                         break
+            if span and raw[span[0]:span[1]] != claim.item:
+                # The check names the figure as it read it, 551100000 for "551.1 百万": the page shows the line's own.
+                claim.written = raw[span[0]:span[1]]
             claim.line_sha, claim.source_sha = line_sha, source_sha
             made.append(claim)
         if not quantities:
@@ -933,5 +1080,7 @@ def source_text(con: sqlite3.Connection, url: str) -> dict[str, Any]:
     """A source's stored text, with where each page starts and ends and the number printed on it, for the page to show."""
     row = con.execute("SELECT title, text FROM documents WHERE url=?", (url,)).fetchone()
     pages_kept = con.execute("SELECT page, start, end_at, folio FROM document_pages WHERE url=? ORDER BY page", (url,)).fetchall()
-    return {"url": url, "title": (row[0] if row else "") or "", "text": (row[1] if row else None),
-            "pages": [[page, start, end, folio or ""] for page, start, end, folio in pages_kept]}
+    text = (row[1] if row else None) or None
+    places = astral_places(text or "")
+    return {"url": url, "title": (row[0] if row else "") or "", "text": text,
+            "pages": [[page, in_utf16(places, start), in_utf16(places, end), folio or ""] for page, start, end, folio in pages_kept]}

@@ -86,6 +86,8 @@
   }
 
   const words = (status) => String(status || "").replace(/_/g, " ");
+  // A claim as its line writes it, where the check names it another way ("551.1 百万" for 551100000).
+  const shownAs = (c) => c.written || c.item || words(c.status);
   const claims = () => (S.state ? S.state.claims : []);
   const claim = () => claims()[S.cur] || null;
   const lineKey = (note, line) => `${note}\u0000${line}`;
@@ -132,7 +134,8 @@
     try {
       response = await fetch(path, options);
     } catch {
-      throw new Error("The review server isn't answering. Is the review command still running?");
+      const command = S.state ? `${S.state.slug} review` : "the review command";
+      throw new Error(`The review server isn't answering. Is \`${command}\` still running? Start it again to carry on; marks and edits made so far are kept.`);
     }
     let data = null;
     try {
@@ -144,8 +147,13 @@
     return data;
   }
 
+  // What names a claim to the server. The status tells apart two claims on the same item, as a Sources entry that is
+  // both unused and not fetched.
+  // The line as the page shows it goes too, so a mark or a waiver isn't written against a line changed since.
   function claimRef(c) {
-    return { note: c.note, line: c.line, check: c.check, item: c.item };
+    const note = S.state.notes.find((n) => n.file === c.note);
+    const seen = (note && c.line > 0 && note.lines[c.line - 1]) || "";
+    return { note: c.note, line: c.line, check: c.check, item: c.item, status: c.status, seen };
   }
 
   async function act(path, body, done) {
@@ -153,11 +161,16 @@
     S.busy = true;
     document.body.classList.add("busy");
     const keep = claim() ? { ...claimRef(claim()), index: S.cur } : null;
+    // The checks run again after each change, which takes seconds for a long filing: say so if it isn't quick.
+    const slow = setTimeout(() => toast(path === "/api/mark" ? "Saving the mark…" : "Running the checks again…", { stay: true }), 500);
     try {
       const data = await api(path, body);
+      clearTimeout(slow);
       setState(data, keep, path === "/api/recheck");
+      if (!$("#toast").hidden && $("#toast").dataset.stay) $("#toast").hidden = true;
       if (done) done(data);
     } catch (problem) {
+      clearTimeout(slow);
       toast(problem.message, { error: true });
     } finally {
       S.busy = false;
@@ -180,6 +193,8 @@
   function setState(data, keep, reread) {
     const first = S.state === null;
     S.state = data;
+    // Each new state is drawn whole once; stepping between claims after that only moves what marks the current one.
+    S.version = (S.version || 0) + 1;
     if (reread) S.texts.clear();
     S.byLine = new Map();
     data.claims.forEach((c, index) => {
@@ -203,8 +218,11 @@
 
   function findClaim(keep) {
     const list = claims();
-    const exact = list.findIndex((c) => c.note === keep.note && c.line === keep.line && c.check === keep.check && c.item === keep.item);
+    const same = (c) => c.note === keep.note && c.line === keep.line && c.check === keep.check && c.item === keep.item;
+    const exact = list.findIndex((c) => same(c) && c.status === keep.status);
     if (exact >= 0) return exact;
+    const item = list.findIndex(same);
+    if (item >= 0) return item;
     const sameCheck = list.findIndex((c) => c.note === keep.note && c.line === keep.line && c.check === keep.check);
     if (sameCheck >= 0) return sameCheck;
     const sameLine = list.findIndex((c) => c.note === keep.note && c.line === keep.line);
@@ -305,6 +323,16 @@
     $("#only-open").checked = S.filters.open;
     $("#group-by").value = S.filters.group;
 
+    const list = $("#queue-list");
+    const drawn = `${S.version}|${[...S.filters.off].sort().join(",")}|${S.filters.open}|${S.filters.group}`;
+    if (S.queueDrawn === drawn) {
+      list.querySelectorAll(".qitem.cur").forEach((node) => node.classList.remove("cur"));
+      const current = list.querySelector(`.qitem[data-claim="${S.cur}"]`);
+      if (current) current.classList.add("cur");
+      if (scroll) reveal(list, current, true);
+      return;
+    }
+    S.queueDrawn = drawn;
     const order = visibleOrder();
     const groups = [];
     if (S.filters.group === "source") {
@@ -320,22 +348,34 @@
         if (members.length) groups.push([word, members]);
       }
     } else {
-      const notes = [...S.state.notes.map((note) => note.file), ""];
-      for (const note of notes) {
+      // The notes in the workspace, then any a finding names that isn't among them now (a waiver for a note moved
+      // away), then findings about the workspace as a whole.
+      const present = S.state.notes.map((note) => note.file);
+      const named = claims().map((c) => c.note).filter((note) => note && !present.includes(note));
+      for (const note of [...present, ...new Set(named), ""]) {
         const members = order.filter((index) => claims()[index].note === note);
-        if (members.length) groups.push([note || "The workspace", members]);
+        if (!members.length) continue;
+        groups.push([!note ? "The workspace" : present.includes(note) ? note : `${note} (not among the notes now)`, members]);
       }
     }
-    const list = $("#queue-list");
     if (!groups.length) {
-      list.replaceChildren(el("p", { class: "empty", text: claims().length ? "No claim matches what's shown. Turn a verdict back on above." :
-        "Nothing to review: the checks judged no claim. Fetch the sources the notes cite, then recheck." }));
+      list.replaceChildren(el("p", { class: "empty", text: claims().length ? "No claim matches what's shown. Turn a verdict back on above." : nothingYet() }));
       return;
     }
     list.replaceChildren(...groups.map(([title, members]) => el("section", { class: "group" },
       el("h3", {}, el("span", { text: title }), el("span", { text: members.length })),
       el("ol", {}, members.map((index) => el("li", {}, queueItem(index)))))));
     if (scroll) reveal(list, list.querySelector(".qitem.cur"), true);
+  }
+
+  // Why there's nothing to review, and what to do: write notes, or cite and fetch their sources.
+  function nothingYet() {
+    if (!S.state.notes.length) {
+      return "There are no notes yet. Put them, as Markdown files, in the workspace's notes folder (research/, unless " +
+        "workspace.toml names another), then recheck.";
+    }
+    return "Nothing to review: the checks judged no claim. Cite a source on each row with a figure, run " +
+      `\`${S.state.slug} sources\` and \`${S.state.slug} fetch\`, then recheck.`;
   }
 
   function queueItem(index) {
@@ -350,21 +390,47 @@
     return el("button", { type: "button", class: `qitem${index === S.cur ? " cur" : ""}`, "data-claim": index,
       title: `${CHECKS[c.check] || c.check}: ${VWORD[c.verdict]} (${words(c.status)})` },
       el("span", { class: `dot v-${VCLASS[c.verdict]}` }),
-      el("span", { class: "qtext", text: c.item || words(c.status) }),
+      el("span", { class: "qtext", text: shownAs(c) }),
       el("span", { class: "qmeta", text: `${CHECKS[c.check] || c.check} · ${where} · ${words(c.status)}` }),
       markIcon);
   }
 
   // ---- the note
 
+  // Move what marks the current claim in the note drawn, without drawing it again. False when it can't be moved that
+  // way: when the claim shown or the one before it shares a mark with another, which mark shows which is redrawn.
+  function moveCurrent(doc) {
+    const shared = (index) => [...doc.querySelectorAll('mark[data-claims*=","]')]
+      .some((node) => node.dataset.claims.split(",").map(Number).includes(index));
+    if (shared(S.drawnCur) || shared(S.cur)) return false;
+    doc.querySelectorAll("mark.cur, .gm.cur").forEach((node) => node.classList.remove("cur"));
+    doc.querySelectorAll(".cur-line").forEach((node) => node.classList.remove("cur-line"));
+    const c = claim();
+    if (S.browse === null && c && c.note === S.note) {
+      doc.querySelectorAll(`mark[data-claim="${S.cur}"], .gm[data-claim="${S.cur}"]`).forEach((node) => node.classList.add("cur"));
+      doc.querySelectorAll(`[data-line="${c.line}"]`).forEach((node) => node.classList.add("cur-line"));
+    }
+    return true;
+  }
+
   function renderDoc(scroll) {
+    const doc = $("#doc");
+    const drawn = `${S.version}|${S.note}`;
+    if (S.docDrawn === drawn && moveCurrent(doc)) {
+      S.drawnCur = S.cur;
+      if (scroll) reveal(doc, doc.querySelector(".cur-line"));
+      return;
+    }
+    S.docDrawn = drawn;
+    S.drawnCur = S.cur;
     const pick = $("#note-pick");
     pick.replaceChildren(...S.state.notes.map((note) => el("option", { value: note.file, text: note.file })));
     pick.value = S.note;
-    const doc = $("#doc");
     const note = S.state.notes.find((n) => n.file === S.note);
     if (!note) {
-      doc.replaceChildren(el("p", { class: "empty", text: "There are no notes in this workspace." }));
+      doc.replaceChildren(el("p", { class: "empty", text: S.state.notes.length
+        ? `${S.note} isn't among the workspace's notes now: it may have been moved, renamed or skipped. Choose a note above.`
+        : "There are no notes in this workspace." }));
       $("#doc-meta").textContent = "";
       return;
     }
@@ -450,46 +516,69 @@
     return el("div", { class: "tbl-wrap" }, el("table", { class: "md" }, el("tbody", {}, rows)));
   }
 
-  // raw[from:to], with each claim and link on it marked. Where marks overlap, the narrowest claim shows.
+  // raw[from:to], with each claim and link on it marked. A claim inside another, as an input inside its working, is
+  // marked inside it, so the outer one stays whole. Claims on the same characters are one mark (`group`), and a link
+  // shows only where no claim stands.
   function marked(raw, from, to, spans) {
-    const here = spans.filter((span) => span.end > from && span.start < to);
-    if (!here.length) return [raw.slice(from, to)];
-    const cuts = new Set([from, to]);
-    for (const span of here) {
-      cuts.add(Math.max(from, span.start));
-      cuts.add(Math.min(to, span.end));
-    }
-    const points = [...cuts].sort((a, b) => a - b);
-    const out = [];
-    let last = null;
-    for (let k = 0; k + 1 < points.length; k += 1) {
-      const [a, b] = [points[k], points[k + 1]];
-      const cover = here.filter((span) => span.start <= a && span.end >= b);
-      const claimed = cover.filter((span) => span.claim !== undefined).sort((p, q) => (p.end - p.start) - (q.end - q.start));
-      const pick = claimed[0] || cover.find((span) => span.link) || null;
-      const text = raw.slice(a, b);
-      if (pick && last && last.pick === pick) {
-        last.node.append(text);
+    const groups = new Map();
+    const links = [];
+    for (const span of spans) {
+      if (span.end <= from || span.start >= to) continue;
+      if (span.claim === undefined) {
+        links.push(span);
         continue;
       }
-      let node;
-      if (!pick) node = document.createTextNode(text);
-      else if (pick.claim !== undefined) node = claimMark(pick.claim, text);
-      else node = el("a", { class: "keylink", href: "#", "data-source": pick.link.sources[0], title: "Open this source" }, text);
-      out.push(node);
-      last = { pick, node };
+      const key = `${span.start}:${span.end}`;
+      if (!groups.has(key)) groups.set(key, { start: span.start, end: span.end, claims: [] });
+      groups.get(key).claims.push(span.claim);
     }
+    const claimed = [...groups.values()];
+    const free = links.filter((link) => !claimed.some((group) => group.start < link.end && link.start < group.end));
+    return nested(raw, from, to, [...claimed, ...free]);
+  }
+
+  function nested(raw, from, to, spans) {
+    const here = spans.filter((span) => span.end > from && span.start < to)
+      .sort((a, b) => a.start - b.start || (b.end - b.start) - (a.end - a.start));
+    const out = [];
+    let at = from;
+    while (here.length) {
+      const span = here.shift();
+      const start = Math.max(span.start, at);
+      const end = Math.min(span.end, to);
+      if (end <= start) continue;
+      if (start > at) out.push(raw.slice(at, start));
+      // What stands wholly inside this span is marked inside it; what only overlaps it is cut to start after it.
+      const inner = [];
+      for (let i = here.length - 1; i >= 0; i -= 1) {
+        if (here[i].start < end && here[i].end <= end) inner.unshift(...here.splice(i, 1));
+      }
+      const children = nested(raw, start, end, inner);
+      out.push(span.claims ? group(span.claims, children)
+        : el("a", { class: "keylink", href: "#", "data-source": span.link.sources[0], title: "Open this source" }, children));
+      at = end;
+    }
+    if (at < to) out.push(raw.slice(at, to));
     return out;
   }
 
-  function claimMark(index, text) {
-    const c = claims()[index];
+  // One mark for the claims on the same characters: the claim shown, if it's one of them, else the worst. Clicking it
+  // again steps to the next of them.
+  function group(indexes, children) {
+    const order = VERDICTS.map(([verdict]) => verdict);
+    const shown = indexes.includes(S.cur) && S.browse === null ? S.cur
+      : [...indexes].sort((a, b) => order.indexOf(claims()[a].verdict) - order.indexOf(claims()[b].verdict))[0];
+    const c = claims()[shown];
     const classes = ["hl", `v-${VCLASS[c.verdict]}`];
-    if (index === S.cur && S.browse === null) classes.push("cur");
+    if (shown === S.cur && S.browse === null) classes.push("cur");
     if (c.mark) classes.push(`m-${c.mark.mark}`);
     if (c.stale) classes.push("stale");
-    const said = `${CHECKS[c.check] || c.check}: ${VWORD[c.verdict]}, ${words(c.status)}` + (c.mark ? `. Marked: ${c.mark.mark}` : "");
-    return el("mark", { class: classes.join(" "), "data-claim": index, title: said }, text);
+    const each = indexes.map((index) => {
+      const one = claims()[index];
+      return `${CHECKS[one.check] || one.check}: ${VWORD[one.verdict]}, ${words(one.status)}` + (one.mark ? `. Marked: ${one.mark.mark}` : "");
+    });
+    const said = each.join("\n") + (indexes.length > 1 ? "\nClick again for the next." : "");
+    return el("mark", { class: classes.join(" "), "data-claim": shown, "data-claims": indexes.join(","), title: said }, children);
   }
 
   // ---- the source
@@ -589,23 +678,44 @@
           });
         })));
     }
-    if (c.check === "sections") {
-      return el("div", { class: "note-card" }, el("h3", { text: "A section of the note" }), el("p", { text: c.detail }));
+    const card = (title, ...body) => el("div", { class: "note-card" }, el("h3", { text: title }), body);
+    if (c.check === "sections") return card("A section of the note", el("p", { text: c.detail }));
+    if (c.check === "waivers") {
+      return card("A waiver in checks/waivers.csv", el("p", { text: c.detail }),
+        el("p", { class: "muted small", text: "Edit or remove the row in that file; the page doesn't change waivers it didn't write." }));
     }
-    return el("div", { class: "note-card" }, el("h3", { text: "No passage to show" }),
-      el("p", { text: c.keys.length ? "The sources this line cites have no address the review knows of." : "This line cites no source." }));
+    if (c.status.startsWith("input")) {
+      const working = claims().findIndex((other) => other.note === c.note && other.line === c.line && other.check === "arithmetic");
+      return card("An input of a worked-out figure", el("p", { text: c.detail }),
+        working >= 0 ? el("button", { type: "button", class: "btn", "data-claim": working }, "See the working") : null);
+    }
+    if (c.check === "citations") {
+      return card("A source key with no address", el("p", { text: c.detail }),
+        el("p", { class: "muted small", text: "Give the key an entry with an address in the note's Sources list, or in the note it borrows from." }));
+    }
+    return card("No passage to show", el("p", { text: c.detail || (c.keys.length
+      ? "The sources this line cites have no address the review knows of." : "This line cites no source, so there's no passage to set beside it.") }));
   }
+
+  // Where a stretch of the source shown starts and ends: at a line's start or end if one is near, else between words.
+  // A page whose text has no line breaks would otherwise be shown whole, a megabyte at a time.
+  const NEAR_BREAK = 400;
+  const NEAR_SPACE = 80;
 
   function snapStart(text, at) {
     if (at <= 0) return 0;
-    const before = text.lastIndexOf("\n", at);
-    return before < 0 ? 0 : before + 1;
+    const line = text.lastIndexOf("\n", at);
+    if (line >= 0 && at - line <= NEAR_BREAK) return line + 1;
+    const space = text.lastIndexOf(" ", at);
+    return space >= 0 && at - space <= NEAR_SPACE ? space + 1 : at;
   }
 
   function snapEnd(text, at) {
     if (at >= text.length) return text.length;
-    const after = text.indexOf("\n", at);
-    return after < 0 ? text.length : after;
+    const line = text.indexOf("\n", at);
+    if (line >= 0 && line - at <= NEAR_BREAK) return line;
+    const space = text.indexOf(" ", at);
+    return space >= 0 && space - at <= NEAR_SPACE ? space : at;
   }
 
   function pageAt(pages, at) {
@@ -677,7 +787,9 @@
     if (start > 0) out.push(el("button", { type: "button", class: "btn more", "data-more": "before" }, `Show earlier text (${start.toLocaleString()} characters before)`));
     out.push(pre);
     if (end < text.length) out.push(el("button", { type: "button", class: "btn more", "data-more": "after" }, `Show later text (${(text.length - end).toLocaleString()} characters after)`));
-    if (start > 0 || end < text.length) out.push(el("button", { type: "button", class: "linkish more", "data-more": "all" }, "Show the whole text"));
+    if (start > 0 || end < text.length) {
+      out.push(el("button", { type: "button", class: "linkish more", "data-more": "all" }, `Show the whole text (${text.length.toLocaleString()} characters)`));
+    }
     const before = body.scrollHeight - body.scrollTop;
     body.replaceChildren(...out);
     if (scroll === "keep-bottom") {
@@ -718,8 +830,7 @@
       return;
     }
     if (!c) {
-      bar.replaceChildren(el("p", { class: "why muted", text: claims().length ? "Choose a claim from the list or the note." :
-        "Nothing to review yet. The checks judged no claim: cite a source on each row, fetch the sources, then recheck." }));
+      bar.replaceChildren(el("p", { class: "why muted", text: claims().length ? "Choose a claim from the list or the note." : nothingYet() }));
       return;
     }
     const order = visibleOrder();
@@ -728,7 +839,7 @@
     const parts = [el("div", { class: "bar-head" },
       el("span", { class: `pill v-${VCLASS[c.verdict]}` }, el("span", { class: `dot v-${VCLASS[c.verdict]}` }), VWORD[c.verdict]),
       el("span", { class: "tag", text: CHECKS[c.check] || c.check }),
-      el("span", { class: "bar-item", text: c.item || words(c.status), title: c.item }),
+      el("span", { class: "bar-item", text: shownAs(c), title: c.written ? `${c.written}, read by the check as ${c.item}` : c.item }),
       el("span", { class: "bar-where", text: where }),
       el("span", { class: "bar-nav" },
         el("button", { type: "button", class: "icon-btn", "data-step": "-1", title: "Previous claim (k)", "aria-label": "Previous claim" }, "‹"),
@@ -968,9 +1079,14 @@
       options.undo ? el("button", { type: "button", class: "linkish", "data-act": "undo" }, "Undo") : null].filter(Boolean));
     box.hidden = false;
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => {
-      box.hidden = true;
-    }, options.error ? 9000 : 6000);
+    // A notice that stays is taken down when what it waits on is done; any other goes after a few seconds.
+    if (options.stay) box.dataset.stay = "1";
+    else delete box.dataset.stay;
+    if (!options.stay) {
+      toastTimer = setTimeout(() => {
+        box.hidden = true;
+      }, options.error ? 9000 : 6000);
+    }
   }
 
   // ---------------------------------------------------------------- wiring
@@ -985,8 +1101,11 @@
       return;
     }
     if (data.claim !== undefined) {
-      choose(Number(data.claim));
-      $("#queue").classList.remove("open");
+      let next = Number(data.claim);
+      const together = (data.claims || "").split(",").filter(Boolean).map(Number);
+      if (together.length > 1 && next === S.cur) next = together[(together.indexOf(S.cur) + 1) % together.length];
+      choose(next);
+      drawer(false);
       return;
     }
     if (data.verdict !== undefined) {
@@ -1050,9 +1169,14 @@
   }
 
   function onKey(event) {
-    const typing = event.target.matches("input[type=text], textarea, select");
+    const typing = event.target instanceof Element && event.target.matches("input[type=text], textarea, select");
     if (event.key === "Escape") {
       if ($("#help").open) return;
+      if ($("#queue").classList.contains("open")) {
+        drawer(false);
+        event.preventDefault();
+        return;
+      }
       if (S.form) {
         S.form = null;
         S.editLine = null;
@@ -1122,11 +1246,13 @@
     $("#recheck").addEventListener("click", recheck);
     $("#help-open").addEventListener("click", () => $("#help").showModal());
     $("#help-close").addEventListener("click", () => $("#help").close());
-    $("#queue-toggle").addEventListener("click", () => {
-      const queue = $("#queue");
-      queue.classList.toggle("open");
-      $("#queue-toggle").setAttribute("aria-expanded", String(queue.classList.contains("open")));
-    });
+    $("#queue-toggle").addEventListener("click", () => drawer(!$("#queue").classList.contains("open")));
+  }
+
+  // On a narrow screen the list of claims is a drawer: open it, or close it, and say which to a screen reader.
+  function drawer(open) {
+    $("#queue").classList.toggle("open", open);
+    $("#queue-toggle").setAttribute("aria-expanded", String(open));
   }
 
   async function start() {
