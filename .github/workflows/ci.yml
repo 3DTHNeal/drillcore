@@ -141,16 +141,22 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # The one check main's ruleset needs to require. It fails when any job above failed or was cancelled, so adding,
-  # renaming or dropping a job or a matrix cell needs no change to the ruleset.
+  # The one check main's ruleset needs to require. It passes only when every job above succeeded, so adding, renaming
+  # or dropping a job or a matrix cell needs no change to the ruleset. Anything else fails it: a failure, a cancelled
+  # job, and a job GitHub gave up on, as it marks a macOS cell "abandoned" when no runner ever took it.
   all-passed:
     if: always()
     needs: [lint, test, bare-run, privacy]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          echo "A job failed or was cancelled: ${{ join(needs.*.result, ', ') }}"
-          exit 1
-      - run: echo "Every job passed."
+          for result in $RESULTS; do
+            if [ "$result" != success ]; then
+              echo "Not every job passed: $RESULTS"
+              exit 1
+            fi
+          done
+          echo "Every job passed."
