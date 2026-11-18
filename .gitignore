@@ -1,0 +1,30 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Private data never lives in this repository. These patterns are a second line of
+# defense: tools/check_public.py is the first, and it also reads the git history.
+/data/
+/private/
+# A workspace's own folders, in case one is ever made here by mistake.
+/research/
+/checks/
+/drafts/
+/.drillcore-home
+*.db
+*.db-shm
+*.db-wal
+.env
+
+# The example's database is rebuilt when it's needed.
+/example/data/
+
+# Tool caches and build output
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tested/
+*.egg-info/
+build/
+dist/

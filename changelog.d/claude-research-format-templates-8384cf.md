@@ -1,0 +1,3 @@
+### Added
+
+- `drillcore check` can hold named sections of the notes to their sources. List them under `[[check.sections]]` in `workspace.toml`, with the notes they're in and how many lines under each heading must be held to a source (`min_sourced`). A section with fewer fails as thin and says what's under it, and a note the rule covers without the heading fails as missing. A section waiting on a source not yet fetched isn't judged, and a rule that covers no note is a warning. A heading matches without its number, case or source keys, and its sub-headings count toward it. A waiver with `sections` as its check and the heading as its item accepts a thin section until any line of it changes. A workspace that names no sections is checked as before.

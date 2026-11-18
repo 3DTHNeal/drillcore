@@ -1,0 +1,4 @@
+### Added
+
+- **`claims`** works each of the notes' worked-out figures again when every input to it is a figure the claims list matched to the SEC's facts, this time from the facts as filed. It warns of each figure that no longer comes out to the place written, such as a margin of -84.3% worked from 31.6 and 37.5 that the filed 31,571 and 37,482 make -84.23%. Its exit code is unchanged, and it writes the list to `data/workings_as_filed.csv`.
+- **`assay`** warns when a draft copies one of those figures and no line of the notes states it from a source. It also warns when the notes give an amount only as a change ("$3.8M of incremental duty cost") and the draft states it as a level ("duties cost $3.8M"). And it warns when the notes give a figure only as someone's estimate or claim ("a 10x estimated cost saving") and the draft states it as fact, with no word or bracketed source saying whose it is.

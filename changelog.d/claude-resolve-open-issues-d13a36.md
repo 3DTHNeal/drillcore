@@ -1,0 +1,19 @@
+### Added
+
+- Waivers. A row of `checks/waivers.csv` accepts a finding a person has looked at, saying why, who and when. `check`, `citations`, `quotes`, `arithmetic` and `figures` report a waived finding as waived, not failed, and don't exit 1 on it, and the counts say how many were waived. A waiver lapses when the line in the notes or the text of the sources it cites changes, and the finding is reported again with what changed; a waiver that matches nothing is a warning. The example workspace has the file's shape.
+- `check`, `figures` and `assay` keep each run's findings and say what's new, what's fixed and what's unchanged since the last run, listing the new ones first. Unchanged findings are counted rather than listed; `--all` lists everything.
+- `drillcore trace <figure>` follows a figure, or every figure on a draft line such as `01_northbridge.md:7`, from the draft through the note row and source key to the passage in the stored source, with its address, fetch date and hash, and says where the chain breaks.
+- `drillcore evidence` writes a self-contained page for each draft to `data/evidence/`, linking each figure and quotation to its highlighted passage in the stored source, with the last findings of `check` and `assay` (and any waiver) beside the lines they concern. It never fetches.
+- `drillcore arithmetic` and `check` recompute a currency conversion written with its rate, such as `$510M (RMB 3.7bn at 7.25)`, and report one written without a rate as not parsed. The numbers check now leaves the converted figure alone and holds the amount and the rate to the source.
+- `drillcore arithmetic` and `check` foot tables. Each column of figures must add to its Total, Consolidated or Group row, allowing for the rounding of every cell, and a later total may add the totals above it. A row such as "Total debt" that doesn't add up is shown as not parsed rather than failed, since a table of key figures uses such labels for figures of their own. A column of shares mustn't add to more than 100%. A cell it can't read leaves its column not parsed.
+- `drillcore recheck` fetches each cited source again and says which changed, with a diff of the text, which are gone, with the Internet Archive's copy recorded as a second address, and which now refuse. The copy the notes were checked against is kept.
+- `drillcore newer` warns when a cited SEC filing has been followed by a newer periodic filing, and when a later filing restates a fact the notes or `checks/xbrl_claims.csv` use, giving both values and both filings.
+- `drillcore import-file PATH --key S7` keeps a local file (a PDF from a data room, an email) as a source. A Sources entry can name it as `file:deck.pdf` in place of a URL; `fetch` leaves it alone and says to import it.
+- `drillcore inventory` lists every source with its status, fetch date, hash, text size, whether it's primary or secondary (from a `[primary]`/`[secondary]` tag in its entry, a filings registry such as the SEC, or a domain under `[sources] primary`), and the note lines that cite it, and writes `data/inventory.csv`.
+- `drillcore names` lists each proper name the notes and drafts spell more than one way, with where each spelling is written. A workspace can name the spelling it wants with `[names] preferred`.
+- `drillcore export-sources` writes the Sources lists as BibTeX and CSL JSON, with fetch dates as access dates. `drillcore import-sources FILE` proposes Sources entries from a reference manager's export, written to `data/proposed_sources.md` and never to the notes.
+- `drillcore quotes` and `check` warn when a quotation's words are in its source but the person the note says said them isn't named near the passage (`not_near_speaker`).
+
+### Changed
+
+- `drillcore search` shows each hit with the words around it, names the notes and lines that cite its document, and says when none does.

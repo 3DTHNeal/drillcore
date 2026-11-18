@@ -1,0 +1,38 @@
+name: Install pdftotext
+description: Installs poppler-utils on an Ubuntu runner, riding out a package mirror that has stopped answering.
+
+# GitHub's Ubuntu runners fetch packages through a mirror list chosen for the cloud they run in. When Azure's copy of the
+# archive stopped resolving, apt waited minutes on each address, and the jobs hit their time limits before running
+# anything of ours. Once, every ubuntu.com name failed to resolve on those runners while other hosts still answered.
+#
+# So the first try is short and counts a failed index as a failure. If it fails, apt is given one plain source at a time,
+# the Ubuntu archive and then kernel.org's mirror of it, which is outside ubuntu.com. Packages are still checked against
+# Ubuntu's archive key, whichever mirror serves them. Each try is capped, so the whole step stays within a few minutes.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        quick=(-o Acquire::Retries=1 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
+        install() {
+          timeout 150 sudo apt-get "${quick[@]}" update --error-on=any &&
+            timeout 150 sudo apt-get "${quick[@]}" install -y --no-install-recommends poppler-utils
+        }
+        if install; then
+          exit 0
+        fi
+        . /etc/os-release
+        sudo mkdir -p /etc/apt/sources.list.d.unused
+        sudo find /etc/apt/sources.list.d -maxdepth 1 -type f -exec mv -t /etc/apt/sources.list.d.unused {} +
+        sudo truncate -s 0 /etc/apt/sources.list
+        for mirror in http://archive.ubuntu.com/ubuntu/ http://mirrors.edge.kernel.org/ubuntu/; do
+          echo "::warning::The runner's package mirror isn't answering, so apt now tries $mirror"
+          printf '%s\n' "Types: deb" "URIs: $mirror" \
+            "Suites: $VERSION_CODENAME $VERSION_CODENAME-updates $VERSION_CODENAME-security" \
+            "Components: main universe" "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg" |
+            sudo tee /etc/apt/sources.list.d/fallback.sources > /dev/null
+          if install; then
+            exit 0
+          fi
+        done
+        exit 1

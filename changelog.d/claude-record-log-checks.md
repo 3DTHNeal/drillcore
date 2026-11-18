@@ -1,0 +1,3 @@
+### Added
+
+- `[[proof.record_logs]]` holds a record, such as an appendix of AI-use citations, to the log it's compiled from, as `proof`'s new `records` check. Each entry of the log must be in the record and the other way round; each entry's "Date:" and "URL:" must be the log's; each quotation must be in the log's entry word for word, with "…" or a bracketed note standing for words left out; each prompt the log quotes as the author's (straight after an entry's date, or after "exact wording:") must be quoted in the record, unless a file named under `cuts` says, under a heading naming that entry, why it was left out; and each "entry 12" must name an entry the record has. "that entry" with no entry named before it is a warning.

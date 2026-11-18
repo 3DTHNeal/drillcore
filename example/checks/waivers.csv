@@ -1,0 +1,3 @@
+check,note_file,line_no,item,reason,accepted_by,accepted_on
+# A row that starts with # is left out. Take the # away to accept the example note's $999.9M finding:
+#numbers,01_northbridge.md,,$999.9M,Confirmed by phone with the company's press office,A. Researcher,2026-11-11

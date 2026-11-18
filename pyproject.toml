@@ -1,0 +1,104 @@
+# Drillcore runs from a clone: `python tools/drillcore.py ...` needs nothing installed. `pip install -e .` adds a
+# `drillcore` command that runs the same code. It isn't published, and the classifier below makes an upload fail.
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "drillcore"
+# Kept equal to __version__ in tools/drillcore/__init__.py by a test. Not read from there: setuptools would find
+# tools/drillcore.py, the script, before the package beside it.
+version = "0.1.0"
+description = "Pulls the raw sources a set of research notes cites, keeps them with where they came from, and checks every figure in the notes against the source it names."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "Travis Neal" }]
+classifiers = [
+    "Private :: Do Not Upload",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.14",
+]
+# The core is the standard library only, and so is the assay beside it.
+dependencies = []
+
+[project.scripts]
+drillcore = "drillcore.__main__:run"
+
+[project.urls]
+Homepage = "https://github.com/3DTHNeal/drillcore"
+Issues = "https://github.com/3DTHNeal/drillcore/issues"
+Changelog = "https://github.com/3DTHNeal/drillcore/blob/main/CHANGELOG.md"
+
+[tool.setuptools]
+package-dir = { "" = "tools" }
+# assay is the general fact checker, kept here and mirrored into Pyrite by tools/mirror_assay.py. See tools/assay/__init__.py.
+packages = ["drillcore", "assay"]
+
+[tool.setuptools.package-data]
+# The review page: its HTML, style and script, served by `drillcore review`.
+drillcore = ["static/*.html", "static/*.css", "static/*.js"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 160
+src = ["tools", "tools/tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # import order
+    "B",        # likely bugs
+    "UP",       # syntax the minimum Python allows
+    "SIM",      # simpler equivalents
+    "S",        # security
+    "RUF100",   # stale noqa comments
+]
+ignore = [
+    "E731",     # A named one-line lambda is used on purpose for small key functions.
+    "SIM105",   # try/except/pass reads plainer than contextlib.suppress in the few places it occurs.
+    "SIM108",   # A nested conditional expression is harder to read than the if/else it would replace.
+    "SIM117",   # Nested `with` blocks in tests keep each patch on its own line.
+    "S101",     # assert is fine in tests and type narrowing.
+    "S603",     # subprocess calls pass argument lists, never a shell.
+    "S607",     # Partial paths for git and pdftotext are found on PATH by design.
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Fixtures quote whole lines of sample data, and sample credentials that are there to be caught.
+"tools/tests/**" = ["E501", "S105", "S106", "S108", "S311", "S324"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["drillcore", "assay", "check_public", "changelog", "mirror_assay"]
+split-on-trailing-comma = false
+# The tests' support module points DRILLCORE_HOME at a throwaway workspace, so it loads before anything from drillcore.
+section-order = ["future", "standard-library", "third-party", "test-support", "first-party", "local-folder"]
+
+[tool.ruff.lint.isort.sections]
+test-support = ["support"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["tools/drillcore", "tools/assay", "tools/check_public.py", "tools/changelog.py", "tools/mirror_assay.py"]
+mypy_path = "tools"
+ignore_missing_imports = true
+# Without this, mypy skips the body of every function that has no annotations.
+check_untyped_defs = true
+# A bare `dict` or `list` in an annotation says nothing about what's inside, so each one names its contents.
+disallow_any_generics = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[tool.coverage.run]
+source = ["tools"]
+omit = ["tools/tests/*"]
+
+[tool.coverage.report]
+# A floor with some room, not the figure. Raise it as the figure rises.
+fail_under = 80
+skip_covered = true
+show_missing = true

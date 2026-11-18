@@ -1,0 +1,129 @@
+# The example workspace that ships with the code. Everything in it is fictional.
+# With nothing naming a workspace of your own, commands read this one.
+name = "Example"
+created = 2026-11-10
+
+# Where the research notes are, and any file there that isn't one.
+[notes]
+folder = "research"
+skip = []
+# A note that cites another note's sources by their keys says so here:
+#   [notes.borrows]
+#   "02_more.md" = "01_northbridge.md"
+
+# `drillcore check` fails on a failure, and when it judged nothing. Strict, it also fails on any warning or row not
+# judged (one citing no source, or one whose source wasn't fetched) unless a row of checks/waivers.csv accepts it:
+#   [check]
+#   strict = true
+
+# Sections of the notes that must rest on a source, with how many lines under each heading must be held to one. A
+# section with fewer fails `drillcore check`, as does a note the rule covers without the heading. A heading matches
+# without its number, case or the keys in brackets at its end:
+#   [[check.sections]]
+#   notes = ["*_industry.md"]
+#   headings = ["Rivalry", "New entrants", "Substitutes", "Buyer power", "Supplier power"]
+#   min_sourced = 2
+
+# Notes sometimes quote a document that isn't one of their sources, such as a brief they answer. Naming it here
+# makes `drillcore check` and `drillcore quotes` leave a quotation alone when its sentence, or its table column's heading, names the document:
+#   [check.quotations]
+#   not_sources = ["brief"]
+
+# A source that is JSON, such as a price series or a data service's answer, is kept but not read as text: one address
+# of a data service often stands in a Sources list for figures the service serves from many files, and those are
+# `drillcore claims`'s to hold. When the notes take their figures from that very file, list its address here, and
+# `drillcore fetch` reads each value in it as a line of text for `check` and `figures` to judge by. A copy fetched
+# before it was listed is read where it's kept, not fetched again:
+#   [sources]
+#   read_json = ["https://example.com/northbridge/prices.json"]
+# `drillcore inventory` marks a source primary (the company's own filing or release) or secondary (a report about
+# it). A Sources entry can say which with `[primary]` or `[secondary]`; an address on a filings registry, such as the
+# SEC's, is primary, and so is one on a domain listed here. Anything else is left unmarked rather than guessed:
+#   primary = ["northbridge.example"]
+
+# Formulas the notes' figures must keep to, wherever their tables state every figure a rule names for one period.
+# `drillcore arithmetic` and `drillcore check` work each one out in the period of the figure it gives, and "prior"
+# names the year before:
+#   [[arithmetic.rules]]
+#   name = "Gross margin"
+#   formula = "{Gross margin} = {Gross profit} / {Revenue}"
+#   [[arithmetic.rules]]
+#   formula = "{Revenue growth} = {Revenue} / {Revenue, prior} - 1"
+
+# `drillcore assay` judges each draft in the drafts folder against the notes: every figure must be in the notes as
+# written, every web address, domain or email one the notes write. Optional rules:
+#   [assay]
+#   # Confidential names, blocked however a draft splits, joins or pluralizes them.
+#   forbidden = ["Kestrel", "Project Osprey"]
+#   # Claims the notes don't support, as regular expressions. A sentence that makes one fails unless it denies it.
+#   unsupported = ["record (?:year|quarter)"]
+#   # What denies a claim, as regular expressions, in place of the defaults ("not", "no", "never", "without" and such).
+#   disclaimers = ["\\bnot\\b", "\\bno\\b"]
+#   # Opinions, as regular expressions. A sentence that gives one fails unless it says whose it is or cites a source.
+#   judgments = ["\\bshould\\b", "\\bbest\\b"]
+#   # What says whose an opinion is, in place of the defaults ("in the author's view", "chosen by the author", "we estimate").
+#   attributions = ["\\bin the author's view\\b"]
+#   # The day the data were closed. A plan dated to a period already begun by then ("planned ... in the second half
+#   # of 2026") is a warning: say what had happened by then.
+#   cutoff = 2026-10-31
+#   # Where a confidential name may stand after all: in captions, source lines, the reference list or citations.
+#   [assay.allowed]
+#   "Kestrel" = ["captions", "sources"]
+#   # Web addresses the notes won't write, each named whole with why it's accepted. `proof` accepts them too.
+#   [assay.accept_addresses]
+#   "https://doi.org/10.0000/frames.2019" = "a framework article; the notes hold none of its figures"
+
+# `drillcore consistency` pairs a figure only with figures of the same company, read from its label, its table's
+# lead-in or its headings. The companies under [[sec.company]] are known by name; list any others here:
+#   [consistency]
+#   entities = ["Harbor Arms"]
+
+# `drillcore names` lists each proper name spelled more than one way. A name listed here is held to that one spelling,
+# however a note or draft splits or joins it:
+#   [names]
+#   preferred = ["Northbridge Robotics"]
+
+# `drillcore proof` reads each draft's citations, cross-references, exhibits, totals and personal data. A reference
+# list or appendix kept outside the drafts folder is named here, from the workspace's root:
+#   [proof]
+#   references = ["report/references.md"]   # reference lists the citations must resolve to
+#   companions = ["report/appendix_b.md"]   # other parts of the report, read for cross-reference targets
+#   personal = ["Jane Roe"]                  # terms that must not appear in a draft
+#   allow = ["press@northbridge.example"]   # emails, handles and paths that may
+#   workspace_sections = ["Appendix C"]  # headings over figures about this workspace's own record
+# A framework's table can be held to rules of its own: what a column may hold, and an outcome derived from the other
+# columns, the first case whose cells all match giving it.
+#   [[proof.table_rules]]
+#   column = "Ansoff"
+#   values = ["Market penetration", "Market development", "Product development", "Diversification"]
+#   [[proof.table_rules]]
+#   name = "VRIO, in Barney's order"
+#   column = "Outcome"
+#   derive = [
+#       { when = { Valuable = "No" }, then = "disadvantage" },
+#       { when = { Rare = "No" }, then = "parity" },
+#       { when = { "Hard to imitate" = "No" }, then = "temporary" },
+#       { when = { Organized = "No" }, then = "unused" },
+#       { when = {}, then = "sustained" },
+#   ]
+# A record compiled from a log, such as an appendix of AI-use citations, can be held to the log: every entry there,
+# each date, address and quotation the log's, each prompt the log quotes quoted, unless a cuts file says why not.
+#   [[proof.record_logs]]
+#   record = "Appendix B"                    # a heading in a draft, or a companions file
+#   log = "ai_use_log.md"                    # the log it's compiled from
+#   cuts = ["report/left_out.md"]            # what was left out on purpose, under headings naming the entry
+
+# `assay`, `proof` and `overlap` don't read a draft's reference list as what the draft says, nor any section named here
+# by its heading, such as a log of prompts quoted word for word. `assay` still reads such a section for forbidden names,
+# and `proof` for personal data. The drafts are in `drafts/` unless `folder` names another, and `overlap` reports a
+# run of 12 or more words a draft shares with a source unless `min_words` says otherwise:
+#   [drafts]
+#   records = ["Appendix B"]
+#   folder = "drafts"
+#   min_words = 12
+
+# Companies whose SEC structured data `drillcore sec` loads. The number is the SEC's identifier for the filer.
+# This one is made up, so the example loads nothing.
+[[sec.company]]
+cik = 9999999
+name = "Northbridge Robotics"

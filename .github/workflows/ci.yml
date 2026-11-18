@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Every job runs on GitHub's hosted runners, never on a self-hosted one. This repository is public, and a pull request
+# from a fork can rewrite this file, so a self-hosted runner registered here would run a stranger's code on its machine.
+
+# Every step runs in bash, Git Bash on Windows, so a step behaves the same on each runner.
+defaults:
+  run:
+    shell: bash
+
+# A new push to a pull request cancels the run still going on the one before it. Runs on main all finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: tools/requirements*.txt
+      - run: python -m pip install -r tools/requirements.txt -r tools/requirements-dev.txt
+      # Settings for both are in pyproject.toml.
+      - run: python -m ruff check tools
+      - run: python -m mypy
+      # Each pull request's changelog note is a file in changelog.d/. This holds every one to a shape that folds.
+      - run: python tools/changelog.py --check
+      - name: The installed command runs
+        run: |
+          python -m pip install -e .
+          drillcore --version
+          drillcore where
+
+  test:
+    # The oldest Python supported and the newest, on each system the setup guide covers.
+    name: test (${{ matrix.os }}, ${{ matrix.python }})
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.11", "3.14"]
+        # One cell judges coverage.
+        include:
+          - os: ubuntu-latest
+            python: "3.14"
+            coverage: true
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # A key for what the tests can read: every tracked file except the Markdown outside tools/ and example/, which
+      # leaves out the changelog notes and the docs. CHANGELOG.md stays in, since a test may read it.
+      - id: code
+        run: |
+          key=$({ git ls-files -s -- . ':(exclude)*.md'; git ls-files -s -- 'tools/*.md' 'example/*.md' CHANGELOG.md; } | git hash-object --stdin)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+      # When the same code already passed in this cell, on this pull request or on main, the rest is skipped. A push
+      # that only adds a changelog note or edits the docs passes in seconds.
+      - id: passed
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tested
+          key: tested-${{ matrix.os }}-${{ matrix.python }}-${{ steps.code.outputs.key }}
+          lookup-only: true
+      - if: steps.passed.outputs.cache-hit == 'true'
+        run: echo "This code already passed in this cell, so its tests are skipped."
+      - if: steps.passed.outputs.cache-hit != 'true'
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: tools/requirements*.txt
+      - if: steps.passed.outputs.cache-hit != 'true'
+        run: python -m pip install -r tools/requirements.txt -r tools/requirements-dev.txt
+      # Lets the privacy check's tests read a real PDF. Windows runners get pdftotext with Git; on macOS those tests
+      # skip, as they do on any machine without it.
+      - if: steps.passed.outputs.cache-hit != 'true' && runner.os == 'Linux'
+        uses: ./.github/actions/pdftotext
+      - if: steps.passed.outputs.cache-hit != 'true' && !matrix.coverage
+        run: python -m unittest discover -s tools/tests
+      - if: steps.passed.outputs.cache-hit != 'true' && matrix.coverage
+        run: python -m coverage run -m unittest discover -s tools/tests
+      # The floor is fail_under in pyproject.toml.
+      - if: steps.passed.outputs.cache-hit != 'true' && matrix.coverage
+        run: python -m coverage report
+      - if: steps.passed.outputs.cache-hit != 'true'
+        run: mkdir -p .tested && echo "${{ steps.code.outputs.key }}" > .tested/key
+      - if: steps.passed.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tested
+          key: tested-${{ matrix.os }}-${{ matrix.python }}-${{ steps.code.outputs.key }}
+
+  # The README promises the command line works with nothing installed. This holds it to that.
+  bare-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+      - run: python tools/drillcore.py --version
+      - name: With nothing naming a workspace, commands read the example
+        run: test "$(python tools/drillcore.py where 2>/dev/null)" = "$PWD/example"
+
+  # Never skipped, since a changelog note or a docs page can leak as well as code can.
+  privacy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Gitleaks lists a pull request's commits to scan them, which needs read access to pull requests.
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      # pdftotext reads the example PDFs. Without it the check refuses them, since nothing would vouch for their pages.
+      - uses: ./.github/actions/pdftotext
+      # The built-in layer only. The denylist stays on the owner's machine, in the pre-push hook.
+      - run: python tools/check_public.py
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # The one check main's ruleset needs to require. It fails when any job above failed or was cancelled, so adding,
+  # renaming or dropping a job or a matrix cell needs no change to the ruleset.
+  all-passed:
+    if: always()
+    needs: [lint, test, bare-run, privacy]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: |
+          echo "A job failed or was cancelled: ${{ join(needs.*.result, ', ') }}"
+          exit 1
+      - run: echo "Every job passed."

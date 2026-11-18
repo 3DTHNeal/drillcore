@@ -1,0 +1,3 @@
+# What the tool needs to run: nothing. The core is the standard library only, and so is the assay in tools/assay, the
+# deterministic fact checker `check` and `assay` use. Drillcore is where the assay is kept and changed;
+# tools/mirror_assay.py copies it into a clone of Pyrite. The file stays so setups and CI that install it keep working.

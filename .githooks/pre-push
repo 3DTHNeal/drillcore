@@ -1,0 +1,52 @@
+#!/bin/sh
+# Blocks a push that CI's lint job would fail, or that has anything personal in any commit. Turn it on once per clone:
+#   git config core.hooksPath .githooks
+#   git config drillcore.denylist /path/to/your/workspace/profile/public-denylist.txt
+# With a denylist configured, a missing file blocks the push rather than skipping the check.
+# Lint and type check take a few seconds. The tests take minutes, so they're left to you and to CI.
+# Python is the first of these that runs and is 3.11 or newer: `git config drillcore.python`, this checkout's .venv,
+# the main checkout's .venv (so a `git worktree` without one of its own still works), then python3 and python.
+root=$(git rev-parse --show-toplevel)
+cd "$root" || exit 1
+main=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
+
+usable() {
+    [ -n "$1" ] && "$1" -c "import sys; sys.exit(sys.version_info < (3, 11))" >/dev/null 2>&1
+}
+
+python=
+for candidate in "$(git config drillcore.python)" \
+    "$root/.venv/Scripts/python.exe" "$root/.venv/bin/python" \
+    "$main/.venv/Scripts/python.exe" "$main/.venv/bin/python" \
+    python3 python; do
+    if usable "$candidate"; then
+        python=$candidate
+        break
+    fi
+done
+if [ -z "$python" ]; then
+    echo "Push blocked: no Python 3.11 or newer found for the pre-push check. Make the venv from the README's setup, or point the hook at one:" >&2
+    echo "  git config drillcore.python /path/to/python" >&2
+    exit 1
+fi
+if ! "$python" -m ruff --version >/dev/null 2>&1 || ! "$python" -m mypy --version >/dev/null 2>&1; then
+    echo "Push blocked: ruff and mypy aren't installed. Run: $python -m pip install -r tools/requirements-dev.txt" >&2
+    exit 1
+fi
+if ! "$python" -m ruff check tools; then
+    echo "Push blocked: ruff found the problems above, as CI's lint job would. Some fix themselves with: $python -m ruff check tools --fix" >&2
+    exit 1
+fi
+if ! "$python" -m mypy; then
+    echo "Push blocked: mypy found the problems above, as CI's lint job would." >&2
+    exit 1
+fi
+denylist=$(git config drillcore.denylist)
+if [ -n "$denylist" ]; then
+    if [ ! -f "$denylist" ]; then
+        echo "Push blocked: the denylist $denylist is missing." >&2
+        exit 1
+    fi
+    exec "$python" "$root/tools/check_public.py" --denylist "$denylist"
+fi
+exec "$python" "$root/tools/check_public.py"

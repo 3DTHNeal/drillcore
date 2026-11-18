@@ -1,0 +1,5 @@
+claim_id,note_file,description,cik,concepts,period_start,period_end,expected,scale,tolerance
+NBR-2025-rev,01_northbridge.md,Northbridge revenue 2025,9999999,Revenues|SalesRevenueNet,2025-01-01,2025-12-31,551.1,1e+06,0.051
+NBR-2024-rev,01_northbridge.md,Northbridge revenue 2024,9999999,Revenues|SalesRevenueNet,2024-01-01,2024-12-31,570.0,1e+06,0.051
+NBR-2025-cash,01_northbridge.md,Northbridge cash at year end 2025,9999999,CashAndCashEquivalentsAtCarryingValue,,2025-12-31,94.5,1e+06,0.051
+NBR-2023-rev,01_northbridge.md,Northbridge revenue 2023,9999999,Revenues,2023-01-01,2023-12-31,627.6,1e+06,0.051

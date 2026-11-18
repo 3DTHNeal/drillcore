@@ -1,0 +1,7 @@
+* text=auto
+*.pdf binary
+*.docx binary
+*.png binary
+*.cmd text eol=crlf
+# A hook with Windows line endings won't run.
+.githooks/* text eol=lf

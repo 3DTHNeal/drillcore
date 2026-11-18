@@ -1,0 +1,12 @@
+### Added
+
+- `[assay.accept_addresses]` accepts a web address the notes won't write, such as an article's DOI cited for a framework or a page behind a data service the notes cite, each named whole with why: `"https://doi.org/10.0000/frames.2019" = "a framework article"`. `assay` passes it in a draft with that reason, and `proof` passes a reference entry whose address it is. A domain accepts that domain written alone, never every page under it, and the setting is part of the assay's seal.
+- `drillcore proof --all` lists the passes given with a reason too, and the summary counts them for each check.
+
+### Changed
+
+- `proof` traces a figure its sentence labels as the author's working ("author's calculation from Roe 2024", "author's sums", "summed by the author") to the notes rather than to the source it cites: it passes, naming the line, when a worked-out line of the notes ("COMPUTED") gives it and shares a describing word with the sentence. A label in brackets covers the figures before it, back to the citation before it. One no worked-out line gives is still a warning, and says it's labelled. "Author's estimate" is a judgment, not a working, so it labels nothing.
+- An abbreviation joined by an ampersand, R&D, M&A or P&L, is a describing word where a draft is held to the notes, so `assay` binds a draft's "R&D ... $64.2M" to the notes' R&D line, and `proof` reads a summary's or a pointer's sentence the same way. `check` doesn't look for one beside a row's figure in its source, which as often spells it out ("Research and development"), so it reads the notes as before.
+- `assay` reads thousands grouped by spaces, as a note quoting a source writes "58 000 or fewer", as one number, in the notes and in a draft, so a draft's 58,000 is the note's figure. A year never starts such a group. The assay gains a policy setting for it (`spaced_thousands`), off under its exact and measured policies, so its version is now 1.6.
+- In a table that names its currency in its first heading cell, a column's heading or a row's label ("Line (EUR)"), a figure written with a lowercase m or bn, 46.3m, is in millions or billions, as after a currency sign. Elsewhere 1.5m may be metres, and is read as before.
+- A bare figure in a draft's table that states its unit passes when it rounds a figure of the notes in that unit, and says so: (8.4) under "US$ millions" rounds the notes' (8,437) in US$ thousands.

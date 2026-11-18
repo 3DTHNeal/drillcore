@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="review-token" content="__REVIEW_TOKEN__">
+<meta name="referrer" content="no-referrer">
+<title>Review</title>
+<link rel="stylesheet" href="/review.css">
+<script src="/review.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <button class="icon-btn queue-toggle" id="queue-toggle" type="button" aria-controls="queue" aria-expanded="false" title="Show the list of claims">&#9776;</button>
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <strong id="app-name">Review</strong>
+    <span class="muted" id="ws-name"></span>
+  </div>
+  <div class="progress" id="progress" aria-live="polite">
+    <div class="progress-bar" aria-hidden="true"><span id="progress-fill"></span></div>
+    <span id="progress-text"></span>
+  </div>
+  <div class="top-actions">
+    <button type="button" class="btn" id="recheck" title="Run the checks again on the notes as they are now (r)">Recheck</button>
+    <button type="button" class="icon-btn" id="help-open" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
+  </div>
+</header>
+<div class="banner" id="banner" hidden></div>
+<main class="layout" id="layout">
+  <aside class="queue" id="queue" aria-label="Claims to review">
+    <div class="queue-tools">
+      <div class="chips" id="chips" role="group" aria-label="Show claims by verdict"></div>
+      <div class="queue-row">
+        <label class="check"><input type="checkbox" id="only-open"> Not yet marked</label>
+        <label class="select-label"><span class="sr-only">Group by</span>
+          <select id="group-by">
+            <option value="note">In note order</option>
+            <option value="source">By source</option>
+            <option value="verdict">By verdict</option>
+          </select>
+        </label>
+      </div>
+    </div>
+    <div class="queue-list" id="queue-list"></div>
+  </aside>
+  <section class="pane doc-pane" aria-label="The note">
+    <div class="pane-head">
+      <span class="pane-kicker">Note</span>
+      <select id="note-pick" aria-label="Note"></select>
+      <span class="muted small" id="doc-meta"></span>
+    </div>
+    <div class="pane-body doc" id="doc" tabindex="-1"></div>
+  </section>
+  <section class="pane source-pane" aria-label="The source">
+    <div class="pane-head source-head" id="source-head"></div>
+    <div class="source-tools" id="source-tools"></div>
+    <div class="pane-body source" id="source" tabindex="-1"></div>
+  </section>
+</main>
+<footer class="bar" id="bar" aria-label="The claim"></footer>
+<div class="toast" id="toast" role="status" hidden></div>
+<dialog id="help" aria-labelledby="help-title">
+  <h2 id="help-title">Keyboard</h2>
+  <dl class="keys">
+    <dt><kbd>j</kbd> <kbd>k</kbd></dt><dd>Next and previous claim</dd>
+    <dt><kbd>J</kbd> <kbd>K</kbd></dt><dd>Next and previous claim not yet marked</dd>
+    <dt><kbd>]</kbd> <kbd>[</kbd></dt><dd>Next and previous place in the source</dd>
+    <dt><kbd>a</kbd></dt><dd>Mark: matches the source</dd>
+    <dt><kbd>d</kbd></dt><dd>Mark: disagrees with the source, saying how</dd>
+    <dt><kbd>x</kbd></dt><dd>Take the mark away</dd>
+    <dt><kbd>s</kbd></dt><dd>Apply the suggested correction</dd>
+    <dt><kbd>e</kbd></dt><dd>Edit the claim's line yourself (or double-click any line)</dd>
+    <dt><kbd>w</kbd></dt><dd>Accept the finding, with a reason (writes a waiver)</dd>
+    <dt><kbd>u</kbd></dt><dd>Undo the last change to a note</dd>
+    <dt><kbd>l</kbd></dt><dd>Show or hide the row's words in the source</dd>
+    <dt><kbd>r</kbd></dt><dd>Run the checks again</dd>
+    <dt><kbd>Esc</kbd></dt><dd>Close a form</dd>
+  </dl>
+  <h2>Colours</h2>
+  <ul class="legend-list">
+    <li><span class="swatch v-fail"></span> Fails its check</li>
+    <li><span class="swatch v-warn"></span> A warning: worth a look</li>
+    <li><span class="swatch v-open"></span> Not judged: no source, or no text held for it</li>
+    <li><span class="swatch v-waived"></span> Waived: a person accepted it</li>
+    <li><span class="swatch v-pass"></span> Passes its check</li>
+    <li><span class="swatch hit"></span> In the source: where it stands</li>
+    <li><span class="swatch lbl"></span> In the source: a word the row describes it by</li>
+    <li><span class="swatch rg"></span> In the source: the page or section cited</li>
+  </ul>
+  <p><button class="btn" type="button" id="help-close">Close</button></p>
+</dialog>
+</body>
+</html>
